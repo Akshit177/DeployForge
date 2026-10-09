@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Clone Repo</title>
+</head>
+<body>
+    <input type="text" id="repoInput" placeholder="https://github.com/user/repo">
+    <button id="cloneBtn">Clone Repository</button>
+
+    <script>
+        document.getElementById('cloneBtn').addEventListener('click', async () => {
+            const repo_link = document.getElementById('repoInput').value;
+            
+            if(!repo_link) return alert("Please enter a valid link.");
+
+            try {
+                const response = await fetch('http://localhost:3000/clone', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: repo_link })
+                });
+                
+                const result = await response.text();
+                console.log(result);
+            } catch (error) {
+                console.error("Error connecting to backend:", error);
+            }
+        });
+    </script>
+</body>
+</html>
