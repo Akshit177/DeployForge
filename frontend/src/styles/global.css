@@ -157,6 +157,11 @@ body {
   background-color: #e5e7eb;
 }
 
+.submit-btn:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .submit-btn:active {
   transform: scale(0.99);
 }
@@ -197,7 +202,7 @@ body {
   color: #4ade80;
 }
 
-/* Registration-specific adjustments */
+/* Registration-specific layout adjustments */
 .register-wrapper {
   max-width: 440px;
 }
