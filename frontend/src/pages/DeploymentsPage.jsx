@@ -1,5 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
+import { fetchDeployments } from "../services/deploymentService.js";
 import {
   SearchIcon,
   CloseIcon,
@@ -9,131 +10,68 @@ import {
   ClockIcon,
   ArrowRightIcon,
   CopyIcon,
-  ExternalLinkIcon,
+  SpinnerIcon,
 } from "../components/common/TechIcons.jsx";
 
-const initialDeployments = [
-  {
-    id: "#131",
-    num: "131",
-    message: "feat: add health endpoint",
-    project: "web-app",
-    status: "Succeeded",
-    branch: "main",
-    commit: "3f9a2c1",
-    duration: "53s",
-    time: "Just now",
-    serving: true,
-  },
-  {
-    id: "#130",
-    num: "130",
-    message: "fix: cors preflight handling",
-    project: "api-gateway",
-    status: "Succeeded",
-    branch: "main",
-    commit: "b81d04e",
-    duration: "1m 12s",
-    time: "2h ago",
-    serving: true,
-  },
-  {
-    id: "#129",
-    num: "129",
-    message: "chore: bump express to 4.19",
-    project: "web-app",
-    status: "Succeeded",
-    branch: "main",
-    commit: "7de20ab",
-    duration: "54s",
-    time: "5h ago",
-    serving: false,
-  },
-  {
-    id: "#128",
-    num: "128",
-    message: "feat: markdown rendering",
-    project: "blog-engine",
-    status: "Failed",
-    branch: "develop",
-    commit: "e47f190",
-    duration: "2m 03s",
-    time: "3h ago",
-    serving: false,
-  },
-  {
-    id: "#127",
-    num: "127",
-    message: "docs: update install guide",
-    project: "docs-portal",
-    status: "Succeeded",
-    branch: "main",
-    commit: "12ab9f3",
-    duration: "47s",
-    time: "1d ago",
-    serving: true,
-  },
-  {
-    id: "#126",
-    num: "126",
-    message: "feat: websocket reconnect",
-    project: "chat-service",
-    status: "Queued",
-    branch: "main",
-    commit: "a03bc55",
-    duration: "—",
-    time: "1d ago",
-    serving: false,
-  },
-  {
-    id: "#125",
-    num: "125",
-    message: "refactor: split routes",
-    project: "api-gateway",
-    status: "Stopped",
-    branch: "main",
-    commit: "90fe3c2",
-    duration: "1m 05s",
-    time: "2d ago",
-    serving: false,
-  },
-  {
-    id: "#124",
-    num: "124",
-    message: "initial commit",
-    project: "portfolio-site",
-    status: "Succeeded",
-    branch: "main",
-    commit: "c51d2e8",
-    duration: "31s",
-    time: "4d ago",
-    serving: false,
-  },
-];
+function timeAgo(dateString) {
+  if (!dateString) return "just now";
+  const past = new Date(dateString);
+  if (Number.isNaN(past.getTime())) return "just now";
+  const diffSec = Math.max(0, Math.floor((Date.now() - past.getTime()) / 1000));
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
 
 export default function DeploymentsPage({ navigate }) {
+  const [deployments, setDeployments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selectedProject, setSelectedProject] = useState("All projects");
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [copiedId, setCopiedId] = useState(null);
 
-  const projectsList = ["All projects", "web-app", "api-gateway", "blog-engine", "docs-portal", "chat-service", "portfolio-site"];
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await fetchDeployments();
+      setDeployments(data);
+    } catch (err) {
+      console.warn("Could not load deployments:", err.message);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const projectsList = useMemo(() => {
+    const names = Array.from(new Set(deployments.map((d) => d.project || d.projectName).filter(Boolean)));
+    return ["All projects", ...names];
+  }, [deployments]);
 
   const filteredDeployments = useMemo(() => {
-    return initialDeployments.filter((d) => {
-      const matchProject = selectedProject === "All projects" || d.project === selectedProject;
+    return deployments.filter((d) => {
+      const pName = d.project || d.projectName || "";
+      const matchProject = selectedProject === "All projects" || pName === selectedProject;
+      const statusStr = d.state || d.status || "Queued";
       const matchFilter =
-        filter === "All" ||
-        d.status.toLowerCase() === filter.toLowerCase();
+        filter === "All" || statusStr.toLowerCase() === filter.toLowerCase();
       const matchQuery =
-        d.message.toLowerCase().includes(query.toLowerCase()) ||
-        d.commit.toLowerCase().includes(query.toLowerCase()) ||
-        d.id.toLowerCase().includes(query.toLowerCase()) ||
-        d.project.toLowerCase().includes(query.toLowerCase());
+        (d.message || "").toLowerCase().includes(query.toLowerCase()) ||
+        (d.commit || "").toLowerCase().includes(query.toLowerCase()) ||
+        (d.display_id || d.id || "").toLowerCase().includes(query.toLowerCase()) ||
+        pName.toLowerCase().includes(query.toLowerCase());
 
       return matchProject && matchFilter && matchQuery;
     });
-  }, [selectedProject, filter, query]);
+  }, [deployments, selectedProject, filter, query]);
 
   const handleCopyId = (e, id) => {
     e.stopPropagation();
@@ -215,6 +153,20 @@ export default function DeploymentsPage({ navigate }) {
         </div>
       </div>
 
+      {error && (
+        <div className="auth-message-block error" style={{ marginBottom: "1.5rem" }}>
+          <span>Failed to load deployments: {error}</span>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={loadData}
+            style={{ marginLeft: "1rem" }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Deployments Table Container */}
       <div className="deployments-table-card">
         <div className="table-header-row">
@@ -228,104 +180,130 @@ export default function DeploymentsPage({ navigate }) {
         </div>
 
         <div className="table-body">
-          {filteredDeployments.length > 0 ? (
-            filteredDeployments.map((d) => (
-              <div
-                key={d.id}
-                className="table-row-item"
-                onClick={() => navigate("/deployments/detail")}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && navigate("/deployments/detail")}
-              >
-                <div className="cell-item cell-id">
-                  <span
-                    className="dep-id-pill"
-                    onClick={(e) => handleCopyId(e, d.id)}
-                    title="Click to copy ID"
-                  >
-                    <code>{d.id}</code>
-                    {copiedId === d.id ? (
-                      <span className="copied-tag">Copied</span>
-                    ) : (
-                      <CopyIcon size={11} className="copy-icon-hover" />
-                    )}
-                  </span>
-                </div>
+          {loading ? (
+            <div className="table-empty-row">
+              <SpinnerIcon size={20} className="spin" />
+              <p style={{ marginTop: "0.5rem" }}>Loading deployments pipeline...</p>
+            </div>
+          ) : filteredDeployments.length > 0 ? (
+            filteredDeployments.map((d) => {
+              const displayId = d.display_id || `#${d.num || 1}`;
+              const timeDisplay = timeAgo(d.created_at);
 
-                <div className="cell-item cell-msg">
-                  <strong className="dep-commit-msg">{d.message}</strong>
-                  <div className="dep-meta-row">
-                    <span className="dep-project-tag">{d.project}</span>
-                    <span className="dot-sep">·</span>
-                    <span className="dep-branch-tag">
-                      <GitBranchIcon size={11} className="branch-svg" />
-                      <span>{d.branch}</span>
-                    </span>
-                    <span className="dot-sep">·</span>
-                    <span className="dep-commit-sha">
-                      <CommitIcon size={10} className="commit-svg" />
-                      <code>{d.commit}</code>
+              return (
+                <div
+                  key={d.id}
+                  className="table-row-item"
+                  onClick={() => navigate(`/deployments/detail?id=${d.id}`)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) =>
+                    (e.key === "Enter" || e.key === " ") && navigate(`/deployments/detail?id=${d.id}`)
+                  }
+                >
+                  <div className="cell-item cell-id">
+                    <span
+                      className="dep-id-pill"
+                      onClick={(e) => handleCopyId(e, displayId)}
+                      title="Click to copy ID"
+                    >
+                      <code>{displayId}</code>
+                      {copiedId === displayId ? (
+                        <span className="copied-tag">Copied</span>
+                      ) : (
+                        <CopyIcon size={11} className="copy-icon-hover" />
+                      )}
                     </span>
                   </div>
-                </div>
 
-                <div className="cell-item cell-status">
-                  <StatusBadge value={d.status} size="sm" />
-                </div>
+                  <div className="cell-item cell-msg">
+                    <strong className="dep-commit-msg">{d.message}</strong>
+                    <div className="dep-meta-row">
+                      <span className="dep-project-tag">{d.project || d.projectName}</span>
+                      <span className="dot-sep">·</span>
+                      <span className="dep-branch-tag">
+                        <GitBranchIcon size={11} className="branch-svg" />
+                        <span>{d.branch}</span>
+                      </span>
+                      <span className="dot-sep">·</span>
+                      <span className="dep-commit-sha">
+                        <CommitIcon size={10} className="commit-svg" />
+                        <code>{d.commit}</code>
+                      </span>
+                    </div>
+                  </div>
 
-                <div className="cell-item cell-duration">
-                  <span className="duration-text">{d.duration}</span>
-                </div>
+                  <div className="cell-item cell-status">
+                    <StatusBadge value={d.status || d.state} size="sm" />
+                  </div>
 
-                <div className="cell-item cell-time">
-                  <span className="time-text">
-                    <ClockIcon size={11} className="clock-svg" />
-                    <span>{d.time}</span>
-                  </span>
-                </div>
+                  <div className="cell-item cell-duration">
+                    <span className="duration-text">{d.duration || "—"}</span>
+                  </div>
 
-                <div className="cell-item cell-serving">
-                  {d.serving ? (
-                    <span className="serving-pill active">
-                      <span className="live-dot" />
-                      <span>Live</span>
+                  <div className="cell-item cell-time">
+                    <span className="time-text">
+                      <ClockIcon size={11} className="clock-svg" />
+                      <span>{timeDisplay}</span>
                     </span>
-                  ) : (
-                    <span className="serving-pill inactive">—</span>
-                  )}
-                </div>
+                  </div>
 
-                <div className="cell-item cell-action">
-                  <button
-                    type="button"
-                    className="view-detail-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate("/deployments/detail");
-                    }}
-                    aria-label={`View deployment ${d.id}`}
-                  >
-                    <span>Details</span>
-                    <ArrowRightIcon size={12} />
-                  </button>
+                  <div className="cell-item cell-serving">
+                    {d.serving ? (
+                      <span className="serving-pill active">
+                        <span className="live-dot" />
+                        <span>Live</span>
+                      </span>
+                    ) : (
+                      <span className="serving-pill inactive">—</span>
+                    )}
+                  </div>
+
+                  <div className="cell-item cell-action">
+                    <button
+                      type="button"
+                      className="view-detail-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/deployments/detail?id=${d.id}`);
+                      }}
+                      aria-label={`View deployment ${displayId}`}
+                    >
+                      <span>Details</span>
+                      <ArrowRightIcon size={12} />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           ) : (
             <div className="table-empty-row">
-              <p>No deployments match your criteria.</p>
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                onClick={() => {
-                  setSelectedProject("All projects");
-                  setFilter("All");
-                  setQuery("");
-                }}
-              >
-                Reset filters
-              </button>
+              <p>
+                {query || filter !== "All" || selectedProject !== "All projects"
+                  ? "No deployments match your criteria."
+                  : "No deployments recorded yet in this workspace."}
+              </p>
+              {query || filter !== "All" || selectedProject !== "All projects" ? (
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => {
+                    setSelectedProject("All projects");
+                    setFilter("All");
+                    setQuery("");
+                  }}
+                >
+                  Reset filters
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary btn-sm"
+                  onClick={() => navigate("/projects/new")}
+                >
+                  Create & deploy a project
+                </button>
+              )}
             </div>
           )}
         </div>

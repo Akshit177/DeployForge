@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
+import { fetchProjects } from "../services/projectService.js";
+import { fetchLogs, connectLogStream } from "../services/logService.js";
 import {
   SearchIcon,
   CloseIcon,
@@ -7,67 +9,85 @@ import {
   PauseIcon,
   DownloadIcon,
   TerminalIcon,
+  SpinnerIcon,
 } from "../components/common/TechIcons.jsx";
 
-const initialLogs = [
-  { id: "1", time: "18:45:01.204", level: "INFO", text: "Server listening on port 3000" },
-  { id: "2", time: "18:45:01.231", level: "INFO", text: "Connected to PostgreSQL (pool size 10)" },
-  { id: "3", time: "18:45:02.018", level: "INFO", text: "GET /health 200 2ms" },
-  { id: "4", time: "18:45:07.442", level: "INFO", text: "POST /api/auth/login 200 84ms" },
-  { id: "5", time: "18:45:07.610", level: "INFO", text: "GET /api/projects 200 21ms" },
-  { id: "6", time: "18:45:12.903", level: "WARN", text: "Slow query (412ms): SELECT * FROM deployments" },
-  { id: "7", time: "18:45:13.115", level: "INFO", text: "GET /api/deployments 200 431ms" },
-  { id: "8", time: "18:45:18.777", level: "INFO", text: "GET /health 200 1ms" },
-  { id: "9", time: "18:45:24.350", level: "ERROR", text: "Redis connection timeout, retrying (1/5)" },
-  { id: "10", time: "18:45:26.352", level: "ERROR", text: "Redis connection timeout, retrying (2/5)" },
-  { id: "11", time: "18:45:28.401", level: "INFO", text: "Redis reconnected" },
-  { id: "12", time: "18:45:28.455", level: "INFO", text: "Replayed 3 queued events" },
-  { id: "13", time: "18:45:31.020", level: "INFO", text: "GET /api/deployments/131 200 63ms" },
-  { id: "14", time: "18:45:31.044", level: "INFO", text: "Deployment #131 running · container a91f3c0e2b7d" },
-  { id: "15", time: "18:45:35.912", level: "INFO", text: "GET /api/deployments/131 200 18ms" },
-  { id: "16", time: "18:45:40.118", level: "WARN", text: "Deprecated header x-powered-by still enabled" },
-  { id: "17", time: "18:45:44.560", level: "INFO", text: "GET /health 200 1ms" },
-  { id: "18", time: "18:45:49.871", level: "INFO", text: "GET /api/projects/web-app 200 24ms" },
-  { id: "19", time: "18:45:55.003", level: "INFO", text: "GET /api/logs/web-app 200 37ms" },
-  { id: "20", time: "18:46:01.292", level: "INFO", text: "GET /health 200 2ms" },
-  { id: "21", time: "18:46:08.730", level: "INFO", text: "POST /api/auth/refresh 200 12ms" },
-  { id: "22", time: "18:46:14.116", level: "WARN", text: "Memory usage at 78% of limit" },
-  { id: "23", time: "18:46:19.504", level: "INFO", text: "GET /health 200 1ms" },
-  { id: "24", time: "18:46:25.887", level: "INFO", text: "GET /api/deployments 200 29ms" },
-];
-
 export default function LogsPage() {
-  const [project, setProject] = useState("web-app");
-  const [container, setContainer] = useState("web-app-131 (a91f3c0e2b7d)");
+  const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
   const [isLive, setIsLive] = useState(true);
   const [filterLevel, setFilterLevel] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
-  const [logs, setLogs] = useState(initialLogs);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
   const scrollContainerRef = useRef(null);
 
-  // Simulated live log append when stream is live
+  // 1. Fetch user projects to populate project selector
   useEffect(() => {
-    if (!isLive) return;
-    const timer = setInterval(() => {
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}.${String(now.getMilliseconds()).padStart(3, "0")}`;
-      const sampleEvents = [
-        { level: "INFO", text: "GET /health 200 1ms" },
-        { level: "INFO", text: "Telemetry heartbeat emitted to Redis" },
-        { level: "INFO", text: "GET /api/deployments/131 200 16ms" },
-        { level: "WARN", text: "Worker memory cache purge threshold at 72%" },
-        { level: "INFO", text: "POST /api/metrics/ingest 204 3ms" },
-      ];
-      const randomEvent = sampleEvents[Math.floor(Math.random() * sampleEvents.length)];
-      setLogs((prev) => [
-        ...prev.slice(-120),
-        { id: Date.now().toString(), time: timeStr, level: randomEvent.level, text: randomEvent.text },
-      ]);
-    }, 4500);
+    fetchProjects()
+      .then((data) => {
+        setProjects(data);
+        if (data.length > 0 && !selectedProjectId) {
+          setSelectedProjectId(data[0].id);
+        }
+      })
+      .catch((err) => console.warn("Failed to load projects for logs:", err));
+  }, []);
 
-    return () => clearInterval(timer);
-  }, [isLive]);
+  // 2. Fetch historical logs and connect live SSE stream
+  useEffect(() => {
+    let cleanupStream = null;
+    setLoading(true);
+
+    const loadHistorical = async () => {
+      try {
+        const historical = await fetchLogs({
+          project_id: selectedProjectId || undefined,
+          limit: 120,
+        });
+        setLogs(historical);
+      } catch (err) {
+        console.warn("Could not fetch historical logs:", err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadHistorical();
+
+    if (isLive) {
+      cleanupStream = connectLogStream(
+        { project_id: selectedProjectId || undefined },
+        {
+          onInit: (initialBatch) => {
+            if (Array.isArray(initialBatch) && initialBatch.length > 0) {
+              setLogs((prev) => {
+                const existingIds = new Set(prev.map((l) => l.id));
+                const newLines = initialBatch.filter((l) => !existingIds.has(l.id));
+                return [...prev, ...newLines];
+              });
+            }
+          },
+          onLog: (newEntry) => {
+            setLogs((prev) => {
+              if (prev.some((l) => l.id === newEntry.id)) return prev;
+              return [...prev.slice(-300), newEntry];
+            });
+          },
+          onError: () => {
+            // Silently retry or maintain state
+          },
+        }
+      );
+    }
+
+    return () => {
+      if (cleanupStream) {
+        cleanupStream();
+      }
+    };
+  }, [selectedProjectId, isLive]);
 
   // Auto-scroll follow
   useEffect(() => {
@@ -78,24 +98,33 @@ export default function LogsPage() {
 
   const filteredLogs = useMemo(() => {
     return logs.filter((log) => {
+      const lvl = (log.level || "INFO").toUpperCase();
       const matchesLevel =
-        filterLevel === "All" || log.level.toLowerCase() === filterLevel.toLowerCase();
+        filterLevel === "All" || lvl === filterLevel.toUpperCase();
+      const text = log.text || log.message || "";
+      const time = log.time || "";
       const matchesSearch =
-        log.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        log.time.toLowerCase().includes(searchQuery.toLowerCase());
+        text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        time.toLowerCase().includes(searchQuery.toLowerCase());
       return matchesLevel && matchesSearch;
     });
   }, [logs, filterLevel, searchQuery]);
 
   const handleDownload = () => {
-    const content = filteredLogs.map((l) => `${l.time} [${l.level}] ${l.text}`).join("\n");
+    const activeProject = projects.find((p) => p.id === selectedProjectId);
+    const projName = activeProject ? activeProject.name : "deployforge";
+    const content = filteredLogs.map((l) => `${l.time} [${l.level}] ${l.text || l.message}`).join("\n");
     const blob = new Blob([content], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${project}-runtime.log`;
+    a.download = `${projName}-runtime.log`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleClear = () => {
+    setLogs([]);
   };
 
   return (
@@ -115,37 +144,24 @@ export default function LogsPage() {
         <div className="stream-selectors-row">
           <div className="selector-group">
             <select
-              value={project}
-              onChange={(e) => setProject(e.target.value)}
+              value={selectedProjectId}
+              onChange={(e) => setSelectedProjectId(e.target.value)}
               className="figma-select select-w-200"
               aria-label="Select Project"
             >
-              <option value="web-app">web-app</option>
-              <option value="api-gateway">api-gateway</option>
-              <option value="portfolio-site">portfolio-site</option>
-              <option value="blog-engine">blog-engine</option>
-              <option value="docs-portal">docs-portal</option>
-              <option value="chat-service">chat-service</option>
-            </select>
-          </div>
-
-          <div className="selector-group">
-            <select
-              value={container}
-              onChange={(e) => setContainer(e.target.value)}
-              className="figma-select select-w-300"
-              aria-label="Select Container"
-            >
-              <option value="web-app-131 (a91f3c0e2b7d)">web-app-131 (a91f3c0e2b7d)</option>
-              <option value="web-app-129 (b42c1d8e9a0f)">web-app-129 (b42c1d8e9a0f)</option>
-              <option value="web-app-127 (c71a3e5f2b8d)">web-app-127 (c71a3e5f2b8d)</option>
+              <option value="">All workspace projects</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
             </select>
           </div>
 
           <div className="stream-live-actions">
             <div className="live-status-pill">
               <span className={`status-indicator status-dot ${isLive ? "green-pulse" : "gray"}`} />
-              <span>{isLive ? "Live" : "Paused"}</span>
+              <span>{isLive ? "Live Stream" : "Paused"}</span>
             </div>
 
             <button
@@ -189,13 +205,13 @@ export default function LogsPage() {
             })}
           </div>
 
-          <div className="search-control-wrap search-w-300">
+          <div className="search-control-wrap search-w-260">
             <SearchIcon size={14} className="search-icon" />
             <input
               className="search-input"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter logs by keyword or timestamp..."
+              placeholder="Search log output..."
               aria-label="Search logs"
             />
             {searchQuery && (
@@ -212,66 +228,74 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {/* Log Console Terminal Card matching Figma */}
-      <div className="log-console-card">
-        {/* Terminal Header */}
-        <div className="console-header-bar">
-          <div className="console-id-label">
-            <TerminalIcon size={14} className="term-svg" />
-            <strong>web-app-131</strong>
+      {/* Terminal Display Card */}
+      <div className="logs-terminal-card" role="region" aria-label="Application log output">
+        {/* Terminal Header Bar */}
+        <div className="term-card-header">
+          <div className="term-dots-cluster" aria-hidden="true">
+            <span className="window-dot dot-red" />
+            <span className="window-dot dot-yellow" />
+            <span className="window-dot dot-green" />
+            <span className="term-window-title">
+              <TerminalIcon size={12} className="inline-term-svg" />
+              <span>stdout/stderr live output</span>
+            </span>
           </div>
-          <div className="console-meta-info">
-            <span>stdout + stderr · {filteredLogs.length} lines</span>
-          </div>
-          <div className="console-scroll-toggle">
+
+          <div className="term-actions-cluster">
+            <label className="autoscroll-toggle-label">
+              <input
+                type="checkbox"
+                checked={autoScroll}
+                onChange={(e) => setAutoScroll(e.target.checked)}
+              />
+              <span>Auto-scroll</span>
+            </label>
+
             <button
               type="button"
-              className={`toggle-autoscroll-btn ${autoScroll ? "on" : ""}`}
-              onClick={() => setAutoScroll(!autoScroll)}
+              className="term-action-btn"
+              onClick={handleClear}
+              title="Clear visible logs"
             >
-              Auto-scroll {autoScroll ? "on" : "off"}
+              Clear
+            </button>
+
+            <button
+              type="button"
+              className="term-action-btn"
+              onClick={handleDownload}
+              title="Download filtered logs"
+            >
+              <DownloadIcon size={12} />
+              <span>Download</span>
             </button>
           </div>
         </div>
 
-        {/* Console Log Rows */}
-        <div
-          ref={scrollContainerRef}
-          className="console-output-scroll"
-          tabIndex={0}
-          aria-live="polite"
-        >
-          {filteredLogs.length > 0 ? (
+        {/* Log Lines Stream Body */}
+        <div className="term-scroll-viewport" ref={scrollContainerRef}>
+          {loading ? (
+            <div className="term-loading-row">
+              <SpinnerIcon size={18} className="spin" />
+              <span>Connecting to log stream socket...</span>
+            </div>
+          ) : filteredLogs.length > 0 ? (
             filteredLogs.map((log) => {
-              const lvl = log.level.toUpperCase();
+              const level = (log.level || "INFO").toLowerCase();
               return (
-                <div key={log.id} className={`console-log-row log-lvl-${lvl.toLowerCase()}`}>
-                  <span className="log-col-time">{log.time}</span>
-                  <span className={`log-col-badge lvl-${lvl.toLowerCase()}`}>{lvl}</span>
-                  <span className="log-col-msg">{log.text}</span>
+                <div key={log.id} className={`term-log-row log-${level}`}>
+                  <time className="log-timestamp">{log.time}</time>
+                  <span className={`log-level-badge lvl-${level}`}>[{log.level}]</span>
+                  <span className="log-text-content">{log.text || log.message}</span>
                 </div>
               );
             })
           ) : (
-            <div className="console-empty-msg">
-              No log events match filter “{filterLevel}” and query “{searchQuery}”.
+            <div className="term-empty-row">
+              <p>No log records match your current filter criteria.</p>
             </div>
           )}
-        </div>
-
-        {/* Terminal Footer */}
-        <div className="console-footer-bar">
-          <span className="footer-retention-text">
-            Showing last 500 lines · retained for 7 days
-          </span>
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            onClick={handleDownload}
-          >
-            <DownloadIcon size={12} />
-            <span>Download .log</span>
-          </button>
         </div>
       </div>
     </div>

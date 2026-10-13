@@ -58,3 +58,38 @@ CREATE INDEX IF NOT EXISTS idx_deployments_project_id ON deployments(project_id)
 CREATE INDEX IF NOT EXISTS idx_deployments_user_id ON deployments(user_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
 CREATE INDEX IF NOT EXISTS idx_deployments_created_at ON deployments(created_at DESC);
+
+-- Logs table
+CREATE TABLE IF NOT EXISTS logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    deployment_id UUID NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    level VARCHAR(20) DEFAULT 'INFO' NOT NULL,
+    source VARCHAR(50) DEFAULT 'build' NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_logs_deployment_id ON logs(deployment_id);
+CREATE INDEX IF NOT EXISTS idx_logs_project_id ON logs(project_id);
+CREATE INDEX IF NOT EXISTS idx_logs_user_id ON logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at DESC);
+
+-- Project Environment Variables (Encrypted Secrets Vault)
+CREATE TABLE IF NOT EXISTS project_env_vars (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key VARCHAR(255) NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    iv VARCHAR(64) NOT NULL,
+    auth_tag VARCHAR(64) NOT NULL,
+    is_secret BOOLEAN DEFAULT false NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    CONSTRAINT uq_project_env_key UNIQUE (project_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_env_project_id ON project_env_vars(project_id);
+CREATE INDEX IF NOT EXISTS idx_env_user_id ON project_env_vars(user_id);

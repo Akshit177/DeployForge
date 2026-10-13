@@ -158,6 +158,26 @@ router.post("/", async (req, res) => {
     );
 
     const newProject = insertResult.rows[0];
+
+    // Automatically queue initial deployment for the newly created project
+    try {
+      await pool.query(
+        `INSERT INTO deployments (
+          project_id, user_id, commit_hash, commit_message, branch, status, trigger, environment, url
+        ) VALUES ($1, $2, $3, $4, $5, 'Queued', 'initial', 'production', $6)`,
+        [
+          newProject.id,
+          req.user.id,
+          newProject.latest_commit || "HEAD",
+          "Initial project import",
+          newProject.branch,
+          domain,
+        ]
+      );
+    } catch (deployErr) {
+      console.warn("Could not insert initial deployment:", deployErr.message);
+    }
+
     return res.status(201).json({
       message: `Project ${projectSlug} created successfully.`,
       project: formatProject(newProject),
@@ -323,5 +343,10 @@ router.delete("/:id", async (req, res) => {
     return res.status(500).json({ message: "Unable to delete project." });
   }
 });
+
+// Nested sub-routes for Environment Variables & Encrypted Secrets Vault
+const envRoutes = require("./envVars.js");
+router.use("/:projectId/env", envRoutes);
+router.use("/:id/env", envRoutes);
 
 module.exports = router;
