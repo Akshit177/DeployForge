@@ -1,8 +1,15 @@
 import { useState, useEffect } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import { fetchProjects } from "../services/projectService.js";
-import { getCurrentUser } from "../services/authService.js";
 import { fetchEnvVars, saveEnvVars, deleteEnvVar } from "../services/envService.js";
+import {
+  fetchSettings,
+  updateProfile,
+  updatePassword,
+  updateNotificationPreferences,
+  addDomain as apiAddDomain,
+  deleteDomain as apiDeleteDomain,
+} from "../services/settingsService.js";
 import {
   GitHubIcon,
   PlusIcon,
@@ -28,11 +35,20 @@ function timeAgo(dateString) {
 export default function SettingsPage() {
   const [displayName, setDisplayName] = useState("Developer");
   const [email, setEmail] = useState("developer@deployforge.dev");
-  const [githubConnected, setGithubConnected] = useState(true);
+  const [githubConnected, setGithubConnected] = useState(false);
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState("");
   const [envLoading, setEnvLoading] = useState(false);
+
+  // Password state
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
 
   // Environment variables state
   const [envVars, setEnvVars] = useState([]);
@@ -49,21 +65,31 @@ export default function SettingsPage() {
   ]);
   const [newDomain, setNewDomain] = useState("");
   const [isAddingDomain, setIsAddingDomain] = useState(false);
+  const [domainError, setDomainError] = useState("");
+  const [domainLoading, setDomainLoading] = useState(false);
 
   // Notifications
   const [notifyFailures, setNotifyFailures] = useState(true);
   const [notifyWeekly, setNotifyWeekly] = useState(false);
 
-  // 1. Load user profile & projects
+  // 1. Load user profile, settings & projects
   useEffect(() => {
-    getCurrentUser()
-      .then((user) => {
-        if (user) {
-          setDisplayName(user.user_name || "Developer");
-          setEmail(user.email || "developer@deployforge.dev");
+    fetchSettings()
+      .then((data) => {
+        if (data.user) {
+          setDisplayName(data.user.user_name || "Developer");
+          setEmail(data.user.email || "developer@deployforge.dev");
+          setGithubConnected(Boolean(data.user.github_connected));
+          if (data.user.notification_preferences) {
+            setNotifyFailures(Boolean(data.user.notification_preferences.notify_failures));
+            setNotifyWeekly(Boolean(data.user.notification_preferences.notify_weekly));
+          }
+        }
+        if (data.domains && data.domains.length > 0) {
+          setDomains(data.domains);
         }
       })
-      .catch(() => {});
+      .catch((err) => console.warn("Failed to load settings:", err));
 
     fetchProjects()
       .then((data) => {
@@ -87,10 +113,79 @@ export default function SettingsPage() {
       .finally(() => setEnvLoading(false));
   }, [selectedProjectId]);
 
-  const handleSaveProfile = (e) => {
+  const handleSaveProfile = async (e) => {
     e.preventDefault();
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    setProfileError("");
+    setProfileSaving(true);
+    try {
+      await updateProfile({
+        name: displayName,
+        email,
+        github_connected: githubConnected,
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err) {
+      setProfileError(err.message || "Failed to save profile");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const handleToggleGithub = async () => {
+    const nextState = !githubConnected;
+    setGithubConnected(nextState);
+    try {
+      await updateProfile({ github_connected: nextState });
+    } catch (err) {
+      setGithubConnected(!nextState);
+      alert(`Could not update GitHub connection: ${err.message}`);
+    }
+  };
+
+  const handleUpdatePassword = async (e) => {
+    e.preventDefault();
+    setPasswordError("");
+    setPasswordSuccess(false);
+
+    if (newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters long.");
+      return;
+    }
+
+    setPasswordLoading(true);
+    try {
+      await updatePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      setPasswordSuccess(true);
+      setCurrentPassword("");
+      setNewPassword("");
+      setTimeout(() => setPasswordSuccess(false), 3000);
+    } catch (err) {
+      setPasswordError(err.message || "Failed to update password");
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
+  const handleToggleFailureAlerts = async (checked) => {
+    setNotifyFailures(checked);
+    try {
+      await updateNotificationPreferences({ notify_failures: checked, notify_weekly: notifyWeekly });
+    } catch (err) {
+      console.warn("Could not save alert preferences:", err);
+    }
+  };
+
+  const handleToggleWeeklyAlerts = async (checked) => {
+    setNotifyWeekly(checked);
+    try {
+      await updateNotificationPreferences({ notify_failures: notifyFailures, notify_weekly: checked });
+    } catch (err) {
+      console.warn("Could not save alert preferences:", err);
+    }
   };
 
   const handleAddVariable = async (e) => {
@@ -119,7 +214,7 @@ export default function SettingsPage() {
     if (!selectedProjectId) return;
     try {
       await deleteEnvVar(selectedProjectId, key || id);
-      setEnvVars((prev) => prev.filter((v) => (v.key !== key && v.id !== id)));
+      setEnvVars((prev) => prev.filter((v) => v.key !== key && v.id !== id));
     } catch (err) {
       alert(`Failed to delete variable: ${err.message}`);
     }
@@ -133,7 +228,6 @@ export default function SettingsPage() {
     } else {
       nextRevealed.add(id);
       setRevealedIds(nextRevealed);
-      // Fetch decrypted value if not yet cached
       if (!unmaskedValues[id] && selectedProjectId) {
         try {
           const revealedList = await fetchEnvVars(selectedProjectId, { reveal: true });
@@ -148,15 +242,30 @@ export default function SettingsPage() {
     }
   };
 
-  const handleAddDomain = (e) => {
+  const handleAddDomain = async (e) => {
     e.preventDefault();
     if (!newDomain.trim()) return;
-    setDomains([
-      ...domains,
-      { domain: newDomain.trim().toLowerCase(), status: "Active", isDefault: false },
-    ]);
-    setNewDomain("");
-    setIsAddingDomain(false);
+    setDomainError("");
+    setDomainLoading(true);
+    try {
+      const added = await apiAddDomain(newDomain.trim().toLowerCase(), selectedProjectId || null);
+      setDomains((prev) => [...prev, added]);
+      setNewDomain("");
+      setIsAddingDomain(false);
+    } catch (err) {
+      setDomainError(err.message || "Failed to add domain");
+    } finally {
+      setDomainLoading(false);
+    }
+  };
+
+  const handleDeleteDomain = async (domainId, domainName) => {
+    try {
+      await apiDeleteDomain(domainId || domainName);
+      setDomains((prev) => prev.filter((d) => d.id !== domainId && d.domain !== domainName));
+    } catch (err) {
+      alert(`Could not remove domain: ${err.message}`);
+    }
   };
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
@@ -168,7 +277,7 @@ export default function SettingsPage() {
         <div>
           <h1 className="figma-page-title">Settings</h1>
           <p className="figma-page-subtitle">
-            Manage your personal profile, encrypted environment variables, domains, and alert preferences.
+            Manage your personal profile, account security, encrypted environment variables, domains, and alert preferences.
           </p>
         </div>
       </div>
@@ -184,6 +293,12 @@ export default function SettingsPage() {
           </div>
 
           <form onSubmit={handleSaveProfile} className="settings-form-col">
+            {profileError && (
+              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
+                {profileError}
+              </div>
+            )}
+
             <div className="form-group-block">
               <label htmlFor="display-name">Full name</label>
               <input
@@ -220,7 +335,7 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   className={`btn-secondary btn-sm ${githubConnected ? "connected" : ""}`}
-                  onClick={() => setGithubConnected(!githubConnected)}
+                  onClick={handleToggleGithub}
                 >
                   {githubConnected ? "Connected" : "Connect"}
                 </button>
@@ -234,14 +349,71 @@ export default function SettingsPage() {
                   <span>Profile updated</span>
                 </span>
               )}
-              <button type="submit" className="btn-primary">
-                Save Changes
+              <button type="submit" className="btn-primary" disabled={profileSaving}>
+                {profileSaving ? "Saving..." : "Save Changes"}
               </button>
             </div>
           </form>
         </section>
 
-        {/* Section 2: Environment Variables (AES-256 Encrypted Secrets Vault) */}
+        {/* Section 2: Account Security & Password */}
+        <section className="settings-section-card" aria-label="Account security">
+          <div className="settings-intro-col">
+            <h2 className="section-col-title">Account Security</h2>
+            <p className="section-col-desc">
+              Update your account password to keep your workspaces and deployments protected.
+            </p>
+          </div>
+
+          <form onSubmit={handleUpdatePassword} className="settings-form-col">
+            {passwordError && (
+              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
+                {passwordError}
+              </div>
+            )}
+
+            <div className="form-group-block">
+              <label htmlFor="current-pass">Current password</label>
+              <input
+                id="current-pass"
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                className="figma-text-input"
+                required
+                placeholder="••••••••••••"
+              />
+            </div>
+
+            <div className="form-group-block">
+              <label htmlFor="new-pass">New password (minimum 8 characters)</label>
+              <input
+                id="new-pass"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="figma-text-input"
+                required
+                minLength={8}
+                placeholder="••••••••••••"
+              />
+            </div>
+
+            <div className="save-action-row">
+              {passwordSuccess && (
+                <span className="save-feedback-pill">
+                  <CheckIcon size={12} />
+                  <span>Password updated successfully</span>
+                </span>
+              )}
+              <button type="submit" className="btn-primary" disabled={passwordLoading}>
+                {passwordLoading ? "Updating..." : "Update Password"}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        {/* Section 3: Environment Variables (AES-256 Encrypted Secrets Vault) */}
         <section className="settings-section-card" aria-label="Environment variables">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Environment Variables</h2>
@@ -383,7 +555,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* Section 3: Custom Domains */}
+        {/* Section 4: Custom Domains */}
         <section className="settings-section-card" aria-label="Custom domains">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Custom Domains</h2>
@@ -393,12 +565,20 @@ export default function SettingsPage() {
           </div>
 
           <div className="settings-form-col">
+            {domainError && (
+              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
+                {domainError}
+              </div>
+            )}
+
             <div className="domains-table-card">
               {domains.map((d) => (
-                <div key={d.domain} className="domain-row-item">
+                <div key={d.id || d.domain} className="domain-row-item">
                   <div className="domain-name-block">
                     <strong className="domain-txt">{d.domain}</strong>
-                    {d.isDefault && <span className="default-pill">System Default</span>}
+                    {d.is_default || d.isDefault ? (
+                      <span className="default-pill">System Default</span>
+                    ) : null}
                   </div>
                   <div className="domain-status-block">
                     <StatusBadge value={d.status} size="sm" />
@@ -411,6 +591,17 @@ export default function SettingsPage() {
                     >
                       <ExternalLinkIcon size={13} />
                     </a>
+                    {!(d.is_default || d.isDefault) && (
+                      <button
+                        type="button"
+                        className="tbl-action-btn delete"
+                        onClick={() => handleDeleteDomain(d.id, d.domain)}
+                        aria-label={`Remove domain ${d.domain}`}
+                        title="Remove domain"
+                      >
+                        <TrashIcon size={13} />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -426,13 +617,16 @@ export default function SettingsPage() {
                   className="figma-text-input"
                 />
                 <div className="add-domain-btns">
-                  <button type="submit" className="btn-primary btn-sm">
-                    Add CNAME
+                  <button type="submit" className="btn-primary btn-sm" disabled={domainLoading}>
+                    {domainLoading ? "Adding..." : "Add CNAME"}
                   </button>
                   <button
                     type="button"
                     className="btn-secondary btn-sm"
-                    onClick={() => setIsAddingDomain(false)}
+                    onClick={() => {
+                      setIsAddingDomain(false);
+                      setDomainError("");
+                    }}
                   >
                     Cancel
                   </button>
@@ -451,7 +645,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* Section 4: Notifications & Alert Preferences */}
+        {/* Section 5: Notifications & Alert Preferences */}
         <section className="settings-section-card" aria-label="Notification settings">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Alert Preferences</h2>
@@ -470,7 +664,7 @@ export default function SettingsPage() {
                 <input
                   type="checkbox"
                   checked={notifyFailures}
-                  onChange={(e) => setNotifyFailures(e.target.checked)}
+                  onChange={(e) => handleToggleFailureAlerts(e.target.checked)}
                 />
                 <span className="switch-slider" />
               </label>
@@ -485,7 +679,7 @@ export default function SettingsPage() {
                 <input
                   type="checkbox"
                   checked={notifyWeekly}
-                  onChange={(e) => setNotifyWeekly(e.target.checked)}
+                  onChange={(e) => handleToggleWeeklyAlerts(e.target.checked)}
                 />
                 <span className="switch-slider" />
               </label>

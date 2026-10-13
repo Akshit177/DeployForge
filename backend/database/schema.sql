@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    github_connected BOOLEAN DEFAULT false NOT NULL,
+    notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
@@ -93,3 +95,18 @@ CREATE TABLE IF NOT EXISTS project_env_vars (
 
 CREATE INDEX IF NOT EXISTS idx_env_project_id ON project_env_vars(project_id);
 CREATE INDEX IF NOT EXISTS idx_env_user_id ON project_env_vars(user_id);
+
+-- Custom Domains table
+CREATE TABLE IF NOT EXISTS custom_domains (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
+    domain VARCHAR(255) NOT NULL,
+    status VARCHAR(50) DEFAULT 'Active' NOT NULL,
+    is_default BOOLEAN DEFAULT false NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    CONSTRAINT uq_custom_domain UNIQUE (domain)
+);
+
+CREATE INDEX IF NOT EXISTS idx_domains_user_id ON custom_domains(user_id);
+CREATE INDEX IF NOT EXISTS idx_domains_project_id ON custom_domains(project_id);

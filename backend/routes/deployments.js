@@ -2,6 +2,7 @@ const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
+const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 
 const router = express.Router();
 
@@ -88,6 +89,16 @@ function formatDeployment(d) {
 }
 
 router.use(authenticateToken);
+
+// GET /api/deployments/queue/status - Redis Streams queue metrics
+router.get("/queue/status", async (req, res) => {
+  try {
+    const metrics = await getQueueMetrics();
+    return res.status(200).json(metrics);
+  } catch (error) {
+    return res.status(500).json({ message: "Unable to retrieve queue metrics." });
+  }
+});
 
 // GET /api/deployments - List user's deployments with optional filters
 router.get("/", async (req, res) => {
@@ -205,6 +216,23 @@ router.post("/", async (req, res) => {
       "system",
       `Deployment #${newDeploy.deployment_number} queued (${deployBranch} · ${deployCommit.slice(0, 7)})`
     );
+
+    // Publish build job to Redis Streams queue
+    try {
+      await publishDeploymentJob({
+        deployment_id: newDeploy.id,
+        project_id: project.id,
+        user_id: req.user.id,
+        repo_url: project.repository_url,
+        branch: deployBranch,
+        commit_hash: deployCommit,
+        runtime: project.runtime,
+        port: project.port,
+        trigger: deployTrigger,
+      });
+    } catch (qErr) {
+      console.warn("Queue publish warning:", qErr.message);
+    }
 
     return res.status(201).json({
       message: `Deployment #${newDeploy.deployment_number} queued successfully.`,

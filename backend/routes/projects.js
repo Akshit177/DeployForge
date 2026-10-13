@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
+const { publishDeploymentJob } = require("../services/queue.js");
 
 const router = express.Router();
 
@@ -161,10 +162,11 @@ router.post("/", async (req, res) => {
 
     // Automatically queue initial deployment for the newly created project
     try {
-      await pool.query(
+      const initialDepRes = await pool.query(
         `INSERT INTO deployments (
           project_id, user_id, commit_hash, commit_message, branch, status, trigger, environment, url
-        ) VALUES ($1, $2, $3, $4, $5, 'Queued', 'initial', 'production', $6)`,
+        ) VALUES ($1, $2, $3, $4, $5, 'Queued', 'initial', 'production', $6)
+        RETURNING *`,
         [
           newProject.id,
           req.user.id,
@@ -174,8 +176,22 @@ router.post("/", async (req, res) => {
           domain,
         ]
       );
+      if (initialDepRes.rows.length > 0) {
+        const initDep = initialDepRes.rows[0];
+        await publishDeploymentJob({
+          deployment_id: initDep.id,
+          project_id: newProject.id,
+          user_id: req.user.id,
+          repo_url: newProject.repository_url,
+          branch: newProject.branch,
+          commit_hash: newProject.latest_commit,
+          runtime: newProject.runtime,
+          port: newProject.port,
+          trigger: "initial",
+        });
+      }
     } catch (deployErr) {
-      console.warn("Could not insert initial deployment:", deployErr.message);
+      console.warn("Could not insert/dispatch initial deployment:", deployErr.message);
     }
 
     return res.status(201).json({

@@ -215,11 +215,17 @@ async function runTestSuite() {
     console.log("==================================================");
   } finally {
     server.close();
+    try {
+      const redis = require("../config/redis.js");
+      redis.disconnect();
+    } catch (_) {}
     await pool.end();
   }
 }
 
-runTestSuite().catch((err) => {
-  console.error("Test execution failed:", err);
-  process.exit(1);
-});
+runTestSuite()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("Test execution failed:", err);
+    process.exit(1);
+  });

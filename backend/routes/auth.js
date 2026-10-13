@@ -15,7 +15,13 @@ const cookieOptions = {
 };
 
 function publicUser(user) {
-    return { id: user.id, user_name: user.name || user.user_name, email: user.email };
+    return {
+        id: user.id,
+        user_name: user.name || user.user_name,
+        email: user.email,
+        github_connected: Boolean(user.github_connected),
+        notification_preferences: user.notification_preferences || { notify_failures: true, notify_weekly: false },
+    };
 }
 
 router.post("/register", async (req, res) => {

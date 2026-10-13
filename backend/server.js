@@ -12,6 +12,9 @@ const authRoutes = require("./routes/auth.js");
 const projectRoutes = require("./routes/projects.js");
 const deploymentRoutes = require("./routes/deployments.js");
 const logRoutes = require("./routes/logs.js");
+const settingsRoutes = require("./routes/settings.js");
+const routingRoutes = require("./routes/routing.js");
+const { syncFromDatabase } = require("./services/proxyRouter.js");
 const app = express();
 
 app.use(express.json());
@@ -25,6 +28,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/deployments", deploymentRoutes);
 app.use("/api/logs", logRoutes);
+app.use("/api/settings", settingsRoutes);
+app.use("/api/routing", routingRoutes);
 
 const frontendDistPath = path.join(__dirname, "../frontend/dist");
 const frontendRootPath = path.join(__dirname, "../frontend");
@@ -39,7 +44,13 @@ app.use((req, res, next) => {
   return res.sendFile(path.join(frontendStaticPath, "index.html"));
 });
 
+const { startWorkerLoop } = require("./workers/deploymentWorker.js");
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server started running on port ${PORT}`);
+  syncFromDatabase().catch((err) => console.warn("Proxy sync warning:", err.message));
+  if (process.env.ENABLE_WORKER !== "false") {
+    startWorkerLoop().catch((err) => console.warn("Worker loop warning:", err.message));
+  }
 });
