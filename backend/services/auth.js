@@ -1,36 +1,39 @@
-const jwt = require('jsonwebtoken');
+const jwt = require("jsonwebtoken");
 
-function getJWTSecert(){
-    const secret = proccess.env.JWT_SECRET;
-    if(!secret){
+function getJWTSecret() {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
         throw new Error("JWT_SECRET is not defined in environment variables");
     }
     return secret;
 }
 
-// Creates a token after users logs in successfully
-function generateAccessToken(){
-    jwt.sign(
-        {
-            userId : String(userID)
-        }, getJWTSeceret(),
+function generateAccessToken(userId) {
+    if (!userId) {
+        throw new Error("A user ID is required to generate an access token.");
+    }
+
+    return jwt.sign(
+        { id: String(userId) },
+        getJWTSecret(),
         {
             algorithm: "HS256",
-            expiresIn: "15m"
+            expiresIn: "15m",
         }
     );
 }
 
-// Veriy Token Recieved 
+function verifyAccessToken(token) {
+    if (!token) {
+        throw new Error("Token is required for verification.");
+    }
 
-function verifyAccessToken(token){
-    jwt.verify(toke, getJWTSecert(),{
-        algorithms: ["HS256"]
+    return jwt.verify(token, getJWTSecret(), {
+        algorithms: ["HS256"],
     });
-
 }
 
-module.export ={
+module.exports = {
     generateAccessToken,
-    verifyAccessToken   
+    verifyAccessToken,
 };

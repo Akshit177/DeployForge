@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 .DS_Store
 node_modules/
 .env
+
+#context file
+CONTEXT.md

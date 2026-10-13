@@ -1,7 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require("../config/db.js");
+const { generateAccessToken } = require("../services/auth.js");
 
 const router = express.Router();
 
@@ -11,14 +11,6 @@ const cookieOptions = {
     sameSite: "strict",
     maxAge: 15 * 60 * 1000,
 };
-
-function generateToken(user) {
-    return jwt.sign(
-        { id: user.id, email: user.email },
-        process.env.JWT_SECRET,
-        { expiresIn: "15m" }
-    );
-}
 
 function publicUser(user) {
     return { id: user.id, user_name: user.user_name, email: user.email };
@@ -52,12 +44,12 @@ router.post("/register", async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
         const result = await pool.query(
-            "INSERT INTO users (user_name, email, password) VALUES ($1, $2, $3) RETURNING id, user_name, email",
+            "INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name AS user_name, email",
             [user_name.trim(), normalizedEmail, hashedPassword]
         );
         const user = result.rows[0];
 
-        res.cookie("token", generateToken(user), cookieOptions);
+        res.cookie("token", generateAccessToken(user.id), cookieOptions);
         return res.status(201).json({
             message: `Account created successfully for ${user.user_name}.`,
             user: publicUser(user),
@@ -79,15 +71,15 @@ router.post("/login", async (req, res) => {
 
     try {
         const result = await pool.query(
-            "SELECT id, user_name, email, password FROM users WHERE email = $1",
+            "SELECT id, name AS user_name, email, password_hash FROM users WHERE email = $1",
             [email.trim().toLowerCase()]
         );
         const user = result.rows[0];
-        if (!user || !(await bcrypt.compare(password, user.password))) {
+        if (!user || !(await bcrypt.compare(password, user.password_hash))) {
             return res.status(401).json({ message: "Invalid email or password." });
         }
 
-        res.cookie("token", generateToken(user), cookieOptions);
+        res.cookie("token", generateAccessToken(user.id), cookieOptions);
         return res.status(200).json({
             message: `Welcome back, ${user.user_name}.`,
             user: publicUser(user),
