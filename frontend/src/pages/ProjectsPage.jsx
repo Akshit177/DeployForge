@@ -1,5 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
+import { fetchProjects, deleteProject } from "../services/projectService.js";
 import {
   PlusIcon,
   SearchIcon,
@@ -16,121 +17,98 @@ import {
   HtmlIcon,
   DockerIcon,
   CopyIcon,
+  TrashIcon,
+  SpinnerIcon,
 } from "../components/common/TechIcons.jsx";
 
-const initialProjects = [
-  {
-    id: "p1",
-    name: "web-app",
-    repo: "github.com/acme/web-app",
-    state: "Running",
-    url: "web-app.deployforge.app",
-    age: "just now",
-    runtimeType: "node",
-    runtime: "Node 20 · :3000",
-    commit: "3f9a2c1",
-    branch: "main",
-    deployId: "131",
-  },
-  {
-    id: "p2",
-    name: "api-gateway",
-    repo: "github.com/acme/api-gateway",
-    state: "Running",
-    url: "api-gateway.deployforge.app",
-    age: "1d ago",
-    runtimeType: "go",
-    runtime: "Go 1.22 · :8080",
-    commit: "b81d04e",
-    branch: "main",
-    deployId: "130",
-  },
-  {
-    id: "p3",
-    name: "portfolio-site",
-    repo: "github.com/jane/portfolio",
-    state: "Building",
-    url: "portfolio-site.deployforge.app",
-    age: "38s",
-    runtimeType: "static",
-    runtime: "Static · :80",
-    commit: "9c2e7aa",
-    branch: "main",
-    deployId: "124",
-  },
-  {
-    id: "p4",
-    name: "blog-engine",
-    repo: "github.com/acme/blog-engine",
-    state: "Failed",
-    url: "blog-engine.deployforge.app",
-    age: "3h ago",
-    runtimeType: "python",
-    runtime: "Python 3.12 · :8000",
-    commit: "e47f190",
-    branch: "develop",
-    deployId: "128",
-  },
-  {
-    id: "p5",
-    name: "docs-portal",
-    repo: "github.com/acme/docs",
-    state: "Running",
-    url: "docs-portal.deployforge.app",
-    age: "5d ago",
-    runtimeType: "node",
-    runtime: "Node 20 · :3000",
-    commit: "12ab9f3",
-    branch: "main",
-    deployId: "127",
-  },
-  {
-    id: "p6",
-    name: "chat-service",
-    repo: "github.com/acme/chat-service",
-    state: "Queued",
-    url: "chat-service.deployforge.app",
-    age: "position 1",
-    runtimeType: "node",
-    runtime: "Node 20 · :4000",
-    commit: "a03bc55",
-    branch: "main",
-    deployId: "126",
-  },
-];
+function timeAgo(dateString) {
+  if (!dateString) return "just now";
+  const past = new Date(dateString);
+  if (Number.isNaN(past.getTime())) return "just now";
+  const diffSec = Math.max(0, Math.floor((Date.now() - past.getTime()) / 1000));
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
 
 export default function ProjectsPage({ navigate }) {
+  const [projects, setProjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("All");
   const [copiedCommit, setCopiedCommit] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+
+  const loadProjects = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await fetchProjects();
+      setProjects(data);
+    } catch (err) {
+      console.warn("Could not load backend projects:", err.message);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
+
+  const handleDelete = async (e, id, name) => {
+    e.stopPropagation();
+    if (!window.confirm(`Are you sure you want to delete project "${name}"? This action cannot be undone.`)) {
+      return;
+    }
+    try {
+      setDeletingId(id);
+      await deleteProject(id);
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      alert(`Failed to delete project: ${err.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const filterCounts = useMemo(() => {
     return {
-      All: initialProjects.length,
-      Running: initialProjects.filter((p) => p.state === "Running").length,
-      Building: initialProjects.filter((p) => p.state === "Building").length,
-      Failed: initialProjects.filter((p) => p.state === "Failed").length,
-      Queued: initialProjects.filter((p) => p.state === "Queued").length,
+      All: projects.length,
+      Running: projects.filter((p) => (p.state || p.status) === "Running").length,
+      Building: projects.filter((p) => (p.state || p.status) === "Building").length,
+      Failed: projects.filter((p) => (p.state || p.status) === "Failed").length,
+      Queued: projects.filter((p) => (p.state || p.status) === "Queued").length,
     };
-  }, []);
+  }, [projects]);
 
   const visibleProjects = useMemo(() => {
-    return initialProjects.filter((p) => {
+    return projects.filter((p) => {
+      const pName = p.name || "";
+      const pRepo = p.repo || p.repository_url || "";
+      const pCommit = p.commit || p.latest_commit || "";
+      const pRuntime = p.runtime || "";
+      const pStatus = p.state || p.status || "Queued";
+
       const matchesSearch =
-        p.name.toLowerCase().includes(query.toLowerCase()) ||
-        p.repo.toLowerCase().includes(query.toLowerCase()) ||
-        p.commit.toLowerCase().includes(query.toLowerCase()) ||
-        p.runtime.toLowerCase().includes(query.toLowerCase());
+        pName.toLowerCase().includes(query.toLowerCase()) ||
+        pRepo.toLowerCase().includes(query.toLowerCase()) ||
+        pCommit.toLowerCase().includes(query.toLowerCase()) ||
+        pRuntime.toLowerCase().includes(query.toLowerCase());
 
       const matchesStatus =
-        activeFilter === "All" || p.state.toLowerCase() === activeFilter.toLowerCase();
+        activeFilter === "All" || pStatus.toLowerCase() === activeFilter.toLowerCase();
 
       return matchesSearch && matchesStatus;
     });
-  }, [query, activeFilter]);
+  }, [projects, query, activeFilter]);
 
   const handleCopyCommit = (e, commit) => {
     e.stopPropagation();
+    if (!commit) return;
     navigator.clipboard?.writeText(commit);
     setCopiedCommit(commit);
     setTimeout(() => setCopiedCommit(null), 1800);
@@ -240,101 +218,158 @@ export default function ProjectsPage({ navigate }) {
         </div>
       </div>
 
+      {/* Error notification banner if any */}
+      {error && (
+        <div className="auth-message-block error" style={{ marginBottom: "1.5rem" }}>
+          <span>Failed to sync with backend: {error}</span>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={loadProjects}
+            style={{ marginLeft: "1rem" }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Project Directory Grid */}
       <div className="figma-projects-grid">
-        {visibleProjects.length > 0 ? (
-          visibleProjects.map((p) => (
-            <article
-              key={p.name}
-              className="figma-project-card"
-              tabIndex={0}
-              onClick={() => navigate("/deployments/detail")}
-              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && navigate("/deployments/detail")}
-              role="button"
-              aria-label={`View deployment details for ${p.name}`}
-            >
-              <div className="card-top-row">
-                <h3 className="card-project-name">{p.name}</h3>
-                <StatusBadge value={p.state} size="sm" />
-              </div>
+        {loading ? (
+          <div className="figma-empty-state">
+            <div className="empty-glyph-box">
+              <SpinnerIcon size={24} className="spin" />
+            </div>
+            <h3>Loading workspace projects...</h3>
+            <p>Fetching project repositories and deployment states.</p>
+          </div>
+        ) : visibleProjects.length > 0 ? (
+          visibleProjects.map((p) => {
+            const state = p.state || p.status || "Queued";
+            const ageDisplay = timeAgo(p.created_at);
+            const isDeleting = deletingId === p.id;
 
-              <div className="card-repo-row">
-                <GitHubIcon size={13} className="repo-octo-icon" />
-                <span className="card-repo-mono">{p.repo}</span>
-              </div>
+            return (
+              <article
+                key={p.id || p.name}
+                className="figma-project-card"
+                tabIndex={0}
+                onClick={() => navigate("/deployments/detail")}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && navigate("/deployments/detail")}
+                role="button"
+                aria-label={`View deployment details for ${p.name}`}
+                style={{ opacity: isDeleting ? 0.4 : 1 }}
+              >
+                <div className="card-top-row">
+                  <h3 className="card-project-name">{p.name}</h3>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <StatusBadge value={state} size="sm" />
+                    <button
+                      type="button"
+                      className="env-del-btn"
+                      onClick={(e) => handleDelete(e, p.id, p.name)}
+                      aria-label={`Delete project ${p.name}`}
+                      title="Delete project"
+                      style={{ opacity: 0.7, padding: "2px" }}
+                    >
+                      <TrashIcon size={13} />
+                    </button>
+                  </div>
+                </div>
 
-              <div className="card-commit-tag">
-                <span className="commit-branch-item">
-                  <GitBranchIcon size={12} className="branch-icon-svg" />
-                  <span>{p.branch}</span>
-                </span>
-                <span className="dot-sep">·</span>
-                <span
-                  className="commit-hash-pill"
-                  onClick={(e) => handleCopyCommit(e, p.commit)}
-                  title="Click to copy commit SHA"
-                >
-                  <CommitIcon size={11} className="commit-icon-svg" />
-                  <code>{p.commit}</code>
-                  {copiedCommit === p.commit ? (
-                    <span className="copied-tag">Copied</span>
-                  ) : (
-                    <CopyIcon size={10} className="copy-icon-hover" />
-                  )}
-                </span>
-              </div>
+                <div className="card-repo-row">
+                  <GitHubIcon size={13} className="repo-octo-icon" />
+                  <span className="card-repo-mono">{p.repo || p.repository_url}</span>
+                </div>
 
-              <div className="card-url-row">
-                <a
-                  className="card-domain-link"
-                  href={`https://${p.url}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <span>{p.url}</span>
-                  <ExternalLinkIcon size={12} className="ext-arrow-svg" />
-                </a>
-              </div>
-
-              <footer className="card-footer-meta">
-                <span className="footer-age">
-                  <ClockIcon size={12} className="clock-icon-svg" />
-                  <span>
-                    {p.state === "Building"
-                      ? `Building · ${p.age}`
-                      : p.state === "Queued"
-                      ? `Queued · ${p.age}`
-                      : p.state === "Failed"
-                      ? `Failed ${p.age}`
-                      : `Deployed ${p.age}`}
+                <div className="card-commit-tag">
+                  <span className="commit-branch-item">
+                    <GitBranchIcon size={12} className="branch-icon-svg" />
+                    <span>{p.branch || "main"}</span>
                   </span>
-                </span>
+                  <span className="dot-sep">·</span>
+                  <span
+                    className="commit-hash-pill"
+                    onClick={(e) => handleCopyCommit(e, p.commit || p.latest_commit)}
+                    title="Click to copy commit SHA"
+                  >
+                    <CommitIcon size={11} className="commit-icon-svg" />
+                    <code>{(p.commit || p.latest_commit || "HEAD").slice(0, 7)}</code>
+                    {copiedCommit === (p.commit || p.latest_commit) ? (
+                      <span className="copied-tag">Copied</span>
+                    ) : (
+                      <CopyIcon size={10} className="copy-icon-hover" />
+                    )}
+                  </span>
+                </div>
 
-                <span className="footer-runtime-badge">
-                  {renderRuntimeIcon(p.runtimeType)}
-                  <span>{p.runtime}</span>
-                </span>
-              </footer>
-            </article>
-          ))
+                <div className="card-url-row">
+                  <a
+                    className="card-domain-link"
+                    href={`https://${p.url || p.domain}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <span>{p.url || p.domain}</span>
+                    <ExternalLinkIcon size={12} className="ext-arrow-svg" />
+                  </a>
+                </div>
+
+                <footer className="card-footer-meta">
+                  <span className="footer-age">
+                    <ClockIcon size={12} className="clock-icon-svg" />
+                    <span>
+                      {state === "Building"
+                        ? `Building · ${ageDisplay}`
+                        : state === "Queued"
+                        ? `Queued · ${ageDisplay}`
+                        : state === "Failed"
+                        ? `Failed ${ageDisplay}`
+                        : `Deployed ${ageDisplay}`}
+                    </span>
+                  </span>
+
+                  <span className="footer-runtime-badge">
+                    {renderRuntimeIcon(p.runtimeType || "node")}
+                    <span>{p.runtime}</span>
+                  </span>
+                </footer>
+              </article>
+            );
+          })
         ) : (
           <div className="figma-empty-state">
             <div className="empty-glyph-box">
               <SearchIcon size={24} className="empty-icon-svg" />
             </div>
-            <h3>No projects found</h3>
-            <p>No applications matched your search or status filter.</p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                setQuery("");
-                setActiveFilter("All");
-              }}
-            >
-              Reset filters
-            </button>
+            <h3>{query || activeFilter !== "All" ? "No matching projects" : "No projects yet"}</h3>
+            <p>
+              {query || activeFilter !== "All"
+                ? "No applications matched your search or status filter."
+                : "You haven't imported any applications yet. Connect your first GitHub repository to get started."}
+            </p>
+            {query || activeFilter !== "All" ? (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setQuery("");
+                  setActiveFilter("All");
+                }}
+              >
+                Reset filters
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => navigate("/projects/new")}
+              >
+                <PlusIcon size={14} />
+                <span>Create your first project</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -343,29 +378,32 @@ export default function ProjectsPage({ navigate }) {
       <section className="figma-recent-activity">
         <h2 className="recent-activity-heading">Recent activity</h2>
         <div className="activity-list">
-          <div className="activity-row" onClick={() => navigate("/deployments/detail")} style={{ cursor: "pointer" }}>
-            <span className="activity-icon text-green">
-              <CheckIcon size={13} />
-            </span>
-            <p className="activity-text">Deployment #131 for <strong>web-app</strong> is now running</p>
-            <time className="activity-time">Just now</time>
-          </div>
-
-          <div className="activity-row" onClick={() => navigate("/deployments/detail")} style={{ cursor: "pointer" }}>
-            <span className="activity-icon text-green">
-              <CheckIcon size={13} />
-            </span>
-            <p className="activity-text">Deployment #130 for <strong>api-gateway</strong> is now running</p>
-            <time className="activity-time">2h ago</time>
-          </div>
-
-          <div className="activity-row" onClick={() => navigate("/deployments/detail")} style={{ cursor: "pointer" }}>
-            <span className="activity-icon text-red">
-              <CloseIcon size={12} />
-            </span>
-            <p className="activity-text">Deployment #128 for <strong>blog-engine</strong> failed during build</p>
-            <time className="activity-time">3h ago</time>
-          </div>
+          {projects.length > 0 ? (
+            projects.slice(0, 3).map((p) => (
+              <div
+                key={p.id}
+                className="activity-row"
+                onClick={() => navigate("/deployments/detail")}
+                style={{ cursor: "pointer" }}
+              >
+                <span className="activity-icon text-green">
+                  <CheckIcon size={13} />
+                </span>
+                <p className="activity-text">
+                  Project <strong>{p.name}</strong> was registered and queued for deployment
+                </p>
+                <time className="activity-time">{timeAgo(p.created_at)}</time>
+              </div>
+            ))
+          ) : (
+            <div className="activity-row">
+              <span className="activity-icon text-muted">
+                <ClockIcon size={13} />
+              </span>
+              <p className="activity-text">No recent deployment activity to report.</p>
+              <time className="activity-time">—</time>
+            </div>
+          )}
         </div>
       </section>
     </div>

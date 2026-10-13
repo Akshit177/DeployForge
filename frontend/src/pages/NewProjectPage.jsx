@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createProject } from "../services/projectService.js";
 import {
   GitHubIcon,
   GitBranchIcon,
@@ -31,6 +32,7 @@ export default function NewProjectPage({ navigate }) {
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const [envVars, setEnvVars] = useState([
     { id: "1", key: "NODE_ENV", value: "production", isSecret: false, show: true },
@@ -71,16 +73,28 @@ export default function NewProjectPage({ navigate }) {
     setEnvVars(envVars.filter((v) => v.id !== id));
   };
 
-  const handleDeploy = (e) => {
+  const handleDeploy = async (e) => {
     e.preventDefault();
     setIsDeploying(true);
-    setTimeout(() => {
-      setIsDeploying(false);
+    setErrorMessage("");
+    try {
+      await createProject({
+        name: projectName,
+        repository_url: repoUrl,
+        branch,
+        runtime: selectedRuntime,
+        port: Number.parseInt(port, 10) || 3000,
+        auto_deploy: autoDeploy,
+        env_vars: envVars.map(({ key, value, isSecret }) => ({ key, value, isSecret })),
+      });
       setDeploySuccess(true);
       setTimeout(() => {
-        navigate("/deployments/detail");
-      }, 1000);
-    }, 1400);
+        navigate("/projects");
+      }, 900);
+    } catch (err) {
+      setErrorMessage(err.message || "Failed to create project.");
+      setIsDeploying(false);
+    }
   };
 
   const cleanSlug = projectName.trim().toLowerCase().replace(/[^a-z0-9-]/g, "") || "my-app";
@@ -119,6 +133,12 @@ export default function NewProjectPage({ navigate }) {
               <span className="step-title-txt">Deploy</span>
             </div>
           </div>
+
+          {errorMessage && (
+            <div className="auth-message-block error" style={{ margin: "1rem 0" }}>
+              <span>{errorMessage}</span>
+            </div>
+          )}
 
           <form onSubmit={handleDeploy} className="setup-main-form">
             {/* Repo Field */}

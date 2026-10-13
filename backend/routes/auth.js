@@ -3,6 +3,8 @@ const bcrypt = require("bcryptjs");
 const pool = require("../config/db.js");
 const { generateAccessToken } = require("../services/auth.js");
 
+const { authenticateToken } = require("../middleware/auth.js");
+
 const router = express.Router();
 
 const cookieOptions = {
@@ -13,7 +15,7 @@ const cookieOptions = {
 };
 
 function publicUser(user) {
-    return { id: user.id, user_name: user.user_name, email: user.email };
+    return { id: user.id, user_name: user.name || user.user_name, email: user.email };
 }
 
 router.post("/register", async (req, res) => {
@@ -93,6 +95,12 @@ router.post("/login", async (req, res) => {
 router.post("/logout", (req, res) => {
     res.clearCookie("token", cookieOptions);
     res.status(200).json({ message: "Signed out successfully." });
+});
+
+router.get("/me", authenticateToken, (req, res) => {
+    return res.status(200).json({
+        user: publicUser(req.user),
+    });
 });
 
 module.exports = router;

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import BrandLogo from "../common/BrandLogo.jsx";
 import CommandPalette from "../common/CommandPalette.jsx";
+import { getCurrentUser, logout } from "../../services/authService.js";
 import {
   ProjectsNavIcon,
   DeploymentsNavIcon,
@@ -15,7 +16,7 @@ import {
 } from "../common/TechIcons.jsx";
 
 const navLinks = [
-  { label: "Projects", path: "/projects", Icon: ProjectsNavIcon, count: "6" },
+  { label: "Projects", path: "/projects", Icon: ProjectsNavIcon },
   { label: "Deployments", path: "/deployments", Icon: DeploymentsNavIcon, count: "131" },
   { label: "Logs", path: "/logs", Icon: LogsNavIcon, count: "Live" },
   { label: "Settings", path: "/settings", Icon: SettingsNavIcon },
@@ -24,6 +25,24 @@ const navLinks = [
 export default function AppShell({ path, navigate, children }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+
+  useEffect(() => {
+    getCurrentUser()
+      .then((user) => {
+        if (user) setCurrentUser(user);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch (err) {
+      console.warn("Logout error:", err);
+    }
+    navigate("/login");
+  };
 
   const active = path.startsWith("/projects/new")
     ? "/projects"
@@ -80,11 +99,17 @@ export default function AppShell({ path, navigate, children }) {
           {/* Account Avatar Block */}
           <div className="sidebar-account-block" onClick={() => handleNav("/settings")}>
             <div className="avatar-chip">
-              <span className="avatar-initial">A</span>
+              <span className="avatar-initial">
+                {currentUser?.user_name ? currentUser.user_name.charAt(0).toUpperCase() : "A"}
+              </span>
             </div>
             <div className="account-info">
-              <strong className="account-name">Anurag</strong>
-              <small className="account-type">Personal workspace</small>
+              <strong className="account-name">
+                {currentUser?.user_name || "Workspace"}
+              </strong>
+              <small className="account-type">
+                {currentUser?.email ? currentUser.email : "Personal workspace"}
+              </small>
             </div>
           </div>
 
@@ -145,7 +170,7 @@ export default function AppShell({ path, navigate, children }) {
           <button
             type="button"
             className="sidebar-bottom-link logout"
-            onClick={() => handleNav("/login")}
+            onClick={handleLogout}
           >
             <span className="bottom-link-icon">
               <SignOutIcon size={14} />

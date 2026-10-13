@@ -5,9 +5,11 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const dotenv = require("dotenv");
 
+dotenv.config({ path: path.join(__dirname, ".env") });
 dotenv.config();
 
 const authRoutes = require("./routes/auth.js");
+const projectRoutes = require("./routes/projects.js");
 const app = express();
 
 app.use(express.json());
@@ -18,6 +20,7 @@ app.use(cors({
 }));
 
 app.use("/api/auth", authRoutes);
+app.use("/api/projects", projectRoutes);
 
 const frontendDistPath = path.join(__dirname, "../frontend/dist");
 const frontendRootPath = path.join(__dirname, "../frontend");
