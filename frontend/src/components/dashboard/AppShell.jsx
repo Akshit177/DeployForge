@@ -23,19 +23,33 @@ export default function AppShell({ path, navigate, children }) {
   const [deploymentCount, setDeploymentCount] = useState(null);
 
   useEffect(() => {
+    let isMounted = true;
     getCurrentUser()
       .then((user) => {
-        if (user) setCurrentUser(user);
+        if (!isMounted) return;
+        if (user) {
+          setCurrentUser(user);
+        } else {
+          navigate("/login");
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (isMounted) {
+          navigate("/login");
+        }
+      });
 
     fetchDeployments()
       .then((list) => {
-        if (Array.isArray(list)) {
+        if (isMounted && Array.isArray(list)) {
           setDeploymentCount(list.length);
         }
       })
       .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
   }, [path]);
 
   const navLinks = [
@@ -79,12 +93,13 @@ export default function AppShell({ path, navigate, children }) {
   };
 
   const getBreadcrumbTitle = () => {
-    if (path === "/projects/new") return "Projects / New Project";
-    if (path === "/deployments/detail") return "Deployments / #131";
-    if (path === "/projects") return "Projects";
-    if (path === "/deployments") return "Deployments";
-    if (path === "/logs") return "Logs";
-    if (path === "/settings") return "Settings";
+    const basePath = path.split("?")[0];
+    if (basePath === "/projects/new") return "Projects / New Project";
+    if (basePath === "/deployments/detail") return "Deployments / Details";
+    if (basePath === "/projects") return "Projects";
+    if (basePath === "/deployments") return "Deployments";
+    if (basePath === "/logs") return "Logs";
+    if (basePath === "/settings") return "Settings";
     return "Projects";
   };
 
@@ -172,6 +187,50 @@ export default function AppShell({ path, navigate, children }) {
 
         {/* Sidebar Bottom / Quick Actions */}
         <div className="sidebar-bottom">
+          {currentUser && (
+            <div
+              className="sidebar-user-pill"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                padding: "0.5rem 0.625rem",
+                marginBottom: "0.375rem",
+                borderRadius: "var(--radius-sm)",
+                background: "rgba(255, 255, 255, 0.03)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              <div
+                style={{
+                  width: "22px",
+                  height: "22px",
+                  borderRadius: "50%",
+                  background: "var(--border-strong)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "0.7rem",
+                  fontWeight: 600,
+                  color: "var(--text-primary)",
+                  flexShrink: 0,
+                }}
+              >
+                {(currentUser.username || currentUser.user_name || currentUser.name || currentUser.email || "U")[0].toUpperCase()}
+              </div>
+              <div
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: "0.75rem",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                {currentUser.username || currentUser.user_name || currentUser.name || currentUser.email}
+              </div>
+            </div>
+          )}
           <button
             type="button"
             className="sidebar-bottom-link logout"

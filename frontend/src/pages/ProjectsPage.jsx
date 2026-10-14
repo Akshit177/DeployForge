@@ -481,7 +481,7 @@ export default function ProjectsPage({ navigate }) {
                   </span>
 
                   <span className="footer-runtime-badge">
-                    {renderRuntimeIcon(p.runtimeType || "node")}
+                    {renderRuntimeIcon(p.runtimeType || "docker")}
                     <span>{p.runtime}</span>
                   </span>
                 </footer>

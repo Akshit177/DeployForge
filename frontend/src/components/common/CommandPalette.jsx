@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { fetchProjects } from "../../services/projectService.js";
 import {
   ProjectsNavIcon,
   DeploymentsNavIcon,
@@ -7,31 +8,47 @@ import {
   PlusIcon,
   SearchIcon,
   ExternalLinkIcon,
-  NodeIcon,
-  GoIcon,
-  PythonIcon,
-  HtmlIcon,
+  DockerIcon,
 } from "./TechIcons.jsx";
 
 export default function CommandPalette({ isOpen, onClose, navigate }) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [userProjects, setUserProjects] = useState([]);
 
-  const commands = [
+  useEffect(() => {
+    if (isOpen) {
+      fetchProjects()
+        .then((data) => {
+          if (Array.isArray(data)) setUserProjects(data);
+        })
+        .catch(() => {});
+    }
+  }, [isOpen]);
+
+  const baseCommands = [
     { label: "Go to Projects", path: "/projects", category: "Navigation", Icon: ProjectsNavIcon, shortcut: "G P" },
     { label: "Import / New Project", path: "/projects/new", category: "Action", Icon: PlusIcon, shortcut: "N" },
     { label: "View Deployments", path: "/deployments", category: "Navigation", Icon: DeploymentsNavIcon, shortcut: "G D" },
-    { label: "View Deployment #131 (web-app)", path: "/deployments/detail", category: "Deployments", Icon: DeploymentsNavIcon, shortcut: "#131" },
+    { label: "View Latest Deployment", path: "/deployments/detail", category: "Deployments", Icon: DeploymentsNavIcon, shortcut: "D" },
     { label: "Live Runtime Logs", path: "/logs", category: "Navigation", Icon: LogsNavIcon, shortcut: "G L" },
     { label: "Workspace Settings", path: "/settings", category: "Navigation", Icon: SettingsNavIcon, shortcut: "G S" },
     { label: "Overview & Architecture", path: "/", category: "Information", Icon: ExternalLinkIcon, shortcut: "H" },
-    { label: "Project: web-app", path: "/deployments/detail", category: "Projects", Icon: NodeIcon, meta: "Running · Node 20" },
-    { label: "Project: api-gateway", path: "/deployments/detail", category: "Projects", Icon: GoIcon, meta: "Running · Go 1.22" },
-    { label: "Project: portfolio-site", path: "/deployments/detail", category: "Projects", Icon: HtmlIcon, meta: "Building · Static" },
-    { label: "Project: blog-engine", path: "/deployments/detail", category: "Projects", Icon: PythonIcon, meta: "Failed · Python 3.12" },
-    { label: "Project: docs-portal", path: "/deployments/detail", category: "Projects", Icon: NodeIcon, meta: "Running · Node 20" },
-    { label: "Project: chat-service", path: "/deployments/detail", category: "Projects", Icon: NodeIcon, meta: "Queued · Node 20" },
   ];
+
+  const projectCommands = userProjects.map((p) => {
+    const rawState = (p.state || p.status || "Ready").toLowerCase();
+    const capState = rawState.charAt(0).toUpperCase() + rawState.slice(1);
+    return {
+      label: `Project: ${p.name}`,
+      path: `/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`,
+      category: "Projects",
+      Icon: DockerIcon,
+      meta: `${capState} · Port :${p.port || 3000}`,
+    };
+  });
+
+  const commands = [...baseCommands, ...projectCommands];
 
   const filtered = query.trim()
     ? commands.filter(

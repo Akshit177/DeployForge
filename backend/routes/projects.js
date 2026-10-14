@@ -30,10 +30,12 @@ function normalizeRepoUrl(rawUrl) {
 }
 
 function formatProject(p) {
-  const runtimeType = p.runtime || "node";
+  const runtimeType = p.runtime || "docker";
   const port = p.port || 3000;
   const runtimeDisplay =
-    runtimeType === "node"
+    runtimeType === "docker"
+      ? `Docker · :${port}`
+      : runtimeType === "node"
       ? `Node 20 · :${port}`
       : runtimeType === "python"
       ? `Python 3.12 · :${port}`
@@ -94,7 +96,7 @@ router.post("/", async (req, res) => {
     repository_url,
     repoUrl,
     branch = "main",
-    runtime = "node",
+    runtime = "docker",
     port = 3000,
     auto_deploy = true,
     autoDeploy,
@@ -119,7 +121,7 @@ router.post("/", async (req, res) => {
     });
   }
 
-  const selectedRuntime = ALLOWED_RUNTIMES.includes(runtime) ? runtime : "node";
+  const selectedRuntime = ALLOWED_RUNTIMES.includes(runtime) ? runtime : "docker";
   const parsedPort = Number.parseInt(port, 10);
   const internalPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 3000;
   const isAutoDeploy = autoDeploy !== undefined ? Boolean(autoDeploy) : Boolean(auto_deploy);

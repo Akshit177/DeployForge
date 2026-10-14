@@ -529,7 +529,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
               <button
                 type="submit"
                 className="btn-primary"
-                disabled={isDeploying || selectedRuntime === "python"}
+                disabled={isDeploying}
               >
                 {isDeploying ? (
                   <>
@@ -567,8 +567,8 @@ export default function NewProjectPage({ navigate, searchParams }) {
             <li className="guide-step-item">
               <span className="step-bullet">2</span>
               <div>
-                <strong>Runtime detection & build</strong>
-                <p>Detects Dockerfile or manages build using verified container template.</p>
+                <strong>Root Dockerfile build</strong>
+                <p>Validates root <code>Dockerfile</code> and packages dependencies into an isolated OCI container image.</p>
               </div>
             </li>
             <li className="guide-step-item">

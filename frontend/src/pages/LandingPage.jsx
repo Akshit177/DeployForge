@@ -46,12 +46,12 @@ export default function LandingPage({ navigate }) {
       title: "Isolated builds. Zero configuration.",
       command: "$ docker build -t web-app:3f9a2c1 .",
       steps: [
-        { text: "Dockerfile detected · base image alpine-node:20", status: "done", time: "2.1s" },
-        { text: "C++ worker assigned job from Redis queue", status: "done", time: "2.4s" },
-        { text: "npm ci installed 412 cached packages in 3.8s", status: "done", time: "6.2s" },
-        { text: "Compiled production bundle in 6.8s", status: "done", time: "13.0s" },
+        { text: "Root Dockerfile validated in isolated workspace context", status: "done", time: "1.8s" },
+        { text: "C++ deployment worker assigned job from Redis stream", status: "done", time: "2.1s" },
+        { text: "OCI image build initiated via Docker Engine API", status: "done", time: "4.5s" },
+        { text: "Multi-stage build layers compiled & cached successfully", status: "done", time: "9.2s" },
       ],
-      result: "✔ Container image 9f3b21c built & tagged",
+      result: "✔ Container image df-app-3f9a2c1 built & tagged",
       meta: "Engine: Docker API · Worker: C++",
     },
     {

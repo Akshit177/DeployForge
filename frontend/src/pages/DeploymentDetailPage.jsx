@@ -249,14 +249,24 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
     }
   };
 
+  const paramProjectName = searchParams?.get("project_name") || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("project_name") : null);
   const displayNum = deployment?.display_id || (deployment?.num ? `#${deployment.num}` : "#1");
-  const projectName = deployment?.projectName || deployment?.project || "web-app";
+  const projectName = deployment?.projectName || deployment?.project || paramProjectName || "web-app";
   const projectDomain = deployment?.url || `${projectName}.deployforge.app`;
   const domainHref = projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`;
   const branchName = deployment?.branch || "main";
   const commitSha = deployment?.commit || deployment?.commit_hash?.slice(0, 7) || "HEAD";
   const containerId = deployment?.container_id || (isRunning ? `df-${deployment?.id?.slice(0, 12)}` : null);
   const containerPort = deployment?.port || (deployment?.runtime === "static" ? 80 : 3000);
+
+  if (loading && !deployment) {
+    return (
+      <div className="deployment-detail-page reveal" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "420px", gap: "1rem" }}>
+        <SpinnerIcon size={26} className="spin text-green" />
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem" }}>Loading deployment pipeline...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="deployment-detail-page reveal">

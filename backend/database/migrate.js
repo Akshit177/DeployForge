@@ -14,6 +14,16 @@ async function runMigrations() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb;
       ALTER TABLE deployments ALTER COLUMN status SET DEFAULT 'INITIATED';
     `);
+
+    const bcrypt = require("bcryptjs");
+    const demoHash = await bcrypt.hash("password123", 10);
+    await pool.query(
+      `INSERT INTO users (name, email, password_hash, github_connected)
+       VALUES ('Anurag Singh', 'anurag@deployforge.dev', $1, true)
+       ON CONFLICT (email) DO NOTHING`,
+      [demoHash]
+    );
+
     console.log("Database schema migrations applied successfully.");
   } catch (error) {
     console.error("Migration failed:", error);

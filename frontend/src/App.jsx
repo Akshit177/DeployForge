@@ -30,7 +30,7 @@ export default function App() {
       "/projects/new": "New project",
       "/settings": "Settings",
       "/deployments": "Deployments",
-      "/deployments/detail": "Deployment #131",
+      "/deployments/detail": "Deployment Details",
       "/logs": "Observability logs",
     };
     const currentBase = path.split("?")[0];
