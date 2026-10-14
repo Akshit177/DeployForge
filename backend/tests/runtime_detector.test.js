@@ -47,10 +47,10 @@ describe("Runtime Detector & Workspace Manager", () => {
     cleanupWorkspace(wsPath);
   });
 
-  it("detects user-provided custom Dockerfile", () => {
+  it("detects root Dockerfile in workspace", () => {
     const depId = "test-custom-dockerfile";
     const wsPath = getWorkspacePath(depId);
-    fs.writeFileSync(path.join(wsPath, "Dockerfile"), "FROM alpine\nCMD echo hello");
+    fs.writeFileSync(path.join(wsPath, "Dockerfile"), "FROM alpine:latest\nCMD echo hello");
 
     const info = detectRuntime(wsPath);
     assert.equal(info.runtime, "dockerfile");
@@ -59,13 +59,13 @@ describe("Runtime Detector & Workspace Manager", () => {
     const readyDockerfile = prepareWorkspaceDockerfile(wsPath, info);
     assert.equal(readyDockerfile, path.join(wsPath, "Dockerfile"));
     const content = fs.readFileSync(readyDockerfile, "utf-8");
-    assert.ok(content.includes("FROM alpine"));
+    assert.ok(content.includes("FROM alpine:latest"));
 
     cleanupWorkspace(wsPath);
   });
 
-  it("detects Node.js application from package.json and applies template", () => {
-    const depId = "test-node-app";
+  it("strictly throws when repository has package.json but no Dockerfile", () => {
+    const depId = "test-node-no-dockerfile";
     const wsPath = getWorkspacePath(depId);
     fs.writeFileSync(
       path.join(wsPath, "package.json"),
@@ -75,47 +75,43 @@ describe("Runtime Detector & Workspace Manager", () => {
       })
     );
 
-    const info = detectRuntime(wsPath);
-    assert.equal(info.runtime, "node");
-    assert.equal(info.hasCustomDockerfile, false);
-    assert.equal(info.detectedPort, 3000);
-    assert.equal(info.templateFile, "Dockerfile.node");
-
-    const readyDockerfile = prepareWorkspaceDockerfile(wsPath, info);
-    assert.ok(fs.existsSync(readyDockerfile));
-    const content = fs.readFileSync(readyDockerfile, "utf-8");
-    assert.ok(content.includes("FROM node:20-alpine"));
-    assert.ok(content.includes("USER node"));
+    assert.throws(() => {
+      detectRuntime(wsPath);
+    }, /No root Dockerfile found in repository/);
 
     cleanupWorkspace(wsPath);
   });
 
-  it("detects static site from index.html and applies template", () => {
-    const depId = "test-static-app";
+  it("strictly throws when repository has index.html but no Dockerfile", () => {
+    const depId = "test-static-no-dockerfile";
     const wsPath = getWorkspacePath(depId);
     fs.writeFileSync(path.join(wsPath, "index.html"), "<h1>DeployForge Static Test</h1>");
 
-    const info = detectRuntime(wsPath);
-    assert.equal(info.runtime, "static");
-    assert.equal(info.hasCustomDockerfile, false);
-    assert.equal(info.detectedPort, 80);
-    assert.equal(info.templateFile, "Dockerfile.static");
-
-    const readyDockerfile = prepareWorkspaceDockerfile(wsPath, info);
-    assert.ok(fs.existsSync(readyDockerfile));
-    const content = fs.readFileSync(readyDockerfile, "utf-8");
-    assert.ok(content.includes("FROM nginx:alpine"));
+    assert.throws(() => {
+      detectRuntime(wsPath);
+    }, /No root Dockerfile found in repository/);
 
     cleanupWorkspace(wsPath);
   });
 
-  it("throws error when runtime cannot be detected", () => {
-    const depId = "test-unknown-app";
+  it("throws error when repository directory has no Dockerfile", () => {
+    const depId = "test-empty-repo";
     const wsPath = getWorkspacePath(depId);
     // empty directory
     assert.throws(() => {
       detectRuntime(wsPath);
-    }, /Unable to detect project runtime/);
+    }, /No root Dockerfile found in repository/);
+
+    cleanupWorkspace(wsPath);
+  });
+
+  it("prepareWorkspaceDockerfile throws if Dockerfile is missing on disk", () => {
+    const depId = "test-missing-file";
+    const wsPath = getWorkspacePath(depId);
+
+    assert.throws(() => {
+      prepareWorkspaceDockerfile(wsPath, { hasCustomDockerfile: true });
+    }, /Expected root Dockerfile at/);
 
     cleanupWorkspace(wsPath);
   });

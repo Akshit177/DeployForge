@@ -3,9 +3,6 @@ import { createProject } from "../services/projectService.js";
 import {
   GitHubIcon,
   GitBranchIcon,
-  NodeIcon,
-  PythonIcon,
-  HtmlIcon,
   DockerIcon,
   PlusIcon,
   TrashIcon,
@@ -19,64 +16,6 @@ import {
   ContainerIcon,
   NginxIcon,
 } from "../components/common/TechIcons.jsx";
-
-const STARTER_TEMPLATES = [
-  {
-    id: "node",
-    name: "Node.js Express",
-    desc: "REST API with Express, internal port :3000, and health probes",
-    defaultRepo: "https://github.com/expressjs/express-starter",
-    defaultBranch: "main",
-    defaultName: "node-express-app",
-    runtime: "node",
-    defaultPort: "3000",
-    status: "ready",
-    Icon: NodeIcon,
-  },
-  {
-    id: "static",
-    name: "Static Web Site",
-    desc: "Static HTML/CSS/JS bundle served with Nginx Alpine on port :80",
-    defaultRepo: "https://github.com/deployforge/static-site-template",
-    defaultBranch: "main",
-    defaultName: "static-web-app",
-    runtime: "static",
-    defaultPort: "80",
-    status: "ready",
-    Icon: HtmlIcon,
-  },
-  {
-    id: "python",
-    name: "Python FastAPI",
-    desc: "FastAPI with Uvicorn. Container runtime arriving in Phase D",
-    defaultRepo: "https://github.com/tiangolo/fastapi",
-    defaultBranch: "master",
-    defaultName: "fastapi-service",
-    runtime: "python",
-    defaultPort: "8000",
-    status: "coming-soon",
-    Icon: PythonIcon,
-  },
-  {
-    id: "docker",
-    name: "Custom Dockerfile",
-    desc: "Build using the repository's root Dockerfile on any port",
-    defaultRepo: "",
-    defaultBranch: "main",
-    defaultName: "custom-container-app",
-    runtime: "docker",
-    defaultPort: "3000",
-    status: "ready",
-    Icon: DockerIcon,
-  },
-];
-
-const RUNTIME_OPTIONS = [
-  { id: "node", label: "Node.js", defaultPort: "3000", Icon: NodeIcon, desc: "Express, Fastify, Next.js, or Nest" },
-  { id: "static", label: "Static Site", defaultPort: "80", Icon: HtmlIcon, desc: "HTML/CSS/JS served via Nginx" },
-  { id: "docker", label: "Dockerfile", defaultPort: "3000", Icon: DockerIcon, desc: "Custom container build" },
-  { id: "python", label: "Python (Coming Soon)", defaultPort: "8000", Icon: PythonIcon, desc: "Container engine arrives in Phase D", disabled: true },
-];
 
 function parseEnvString(rawText) {
   const lines = rawText.split("\n");
@@ -136,7 +75,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
   const [projectName, setProjectName] = useState("web-app");
   const [nameError, setNameError] = useState("");
   const [branch, setBranch] = useState("main");
-  const [selectedRuntime, setSelectedRuntime] = useState("node");
+  const [selectedRuntime, setSelectedRuntime] = useState("docker");
   const [port, setPort] = useState("3000");
   const [portError, setPortError] = useState("");
   const [autoDeploy, setAutoDeploy] = useState(true);
@@ -144,9 +83,6 @@ export default function NewProjectPage({ navigate, searchParams }) {
   const [deploySuccess, setDeploySuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [copiedUrl, setCopiedUrl] = useState(false);
-
-  // Starter template selected id
-  const [activeTemplate, setActiveTemplate] = useState(null);
 
   // Env vars state
   const [envMode, setEnvMode] = useState("form"); // "form" | "bulk"
@@ -159,33 +95,6 @@ export default function NewProjectPage({ navigate, searchParams }) {
   );
   const [newKey, setNewKey] = useState("");
   const [newVal, setNewVal] = useState("");
-
-  // Check searchParams on mount for preselected template
-  useEffect(() => {
-    if (!searchParams) return;
-    const templateQuery = searchParams.get("template");
-    if (templateQuery) {
-      applyTemplate(templateQuery);
-    }
-  }, [searchParams]);
-
-  const applyTemplate = (templateId) => {
-    const tmpl = STARTER_TEMPLATES.find((t) => t.id === templateId);
-    if (!tmpl || tmpl.status === "coming-soon") return;
-    setActiveTemplate(tmpl.id);
-    setSelectedRuntime(tmpl.runtime);
-    setPort(tmpl.defaultPort);
-    if (tmpl.defaultRepo) setRepoUrl(tmpl.defaultRepo);
-    if (tmpl.defaultName) setProjectName(tmpl.defaultName);
-    if (tmpl.defaultBranch) setBranch(tmpl.defaultBranch);
-  };
-
-  const handleRuntimeSelect = (rt) => {
-    if (rt.disabled) return;
-    setSelectedRuntime(rt.id);
-    setPort(rt.defaultPort);
-    setActiveTemplate(null);
-  };
 
   const handleAddEnv = (e) => {
     e.preventDefault();
@@ -227,10 +136,6 @@ export default function NewProjectPage({ navigate, searchParams }) {
 
   const handleDeploy = async (e) => {
     e.preventDefault();
-    if (selectedRuntime === "python") {
-      setErrorMessage("Python container runtime is arriving in Phase D and is currently disabled.");
-      return;
-    }
 
     // Validate GitHub Repo URL
     const repoValidation = validateGitHubRepoUrl(repoUrl);
@@ -304,46 +209,8 @@ export default function NewProjectPage({ navigate, searchParams }) {
 
         <h1 className="figma-page-title">Import a repository</h1>
         <p className="figma-page-subtitle">
-          Connect your Git repository or choose a verified template. DeployForge builds, health-checks, and exposes it through zero-downtime Nginx ingress.
+          Connect your Git repository containing a root Dockerfile. DeployForge builds, health-checks, and exposes it through zero-downtime Nginx ingress.
         </p>
-      </div>
-
-      {/* Quick Starter Templates Selection Strip */}
-      <div className="new-project-templates-strip">
-        <div className="templates-strip-header">
-          <span className="templates-strip-title">One-Click Starter Templates</span>
-          <span className="env-sub-note">Pre-configured repositories & container ports</span>
-        </div>
-        <div className="template-pill-selector">
-          {STARTER_TEMPLATES.map((tmpl) => {
-            const isSelected = activeTemplate === tmpl.id;
-            const isSoon = tmpl.status === "coming-soon";
-            const IconComp = tmpl.Icon;
-            return (
-              <div
-                key={tmpl.id}
-                className={`template-pill-card ${isSelected ? "selected" : ""} ${isSoon ? "disabled" : ""}`}
-                onClick={() => !isSoon && applyTemplate(tmpl.id)}
-                title={isSoon ? "Python container runtime is scheduled for Phase D" : `Use ${tmpl.name} template`}
-                role="button"
-                tabIndex={isSoon ? -1 : 0}
-              >
-                <div className="template-pill-top">
-                  <IconComp size={18} className={isSelected ? "text-green" : "text-secondary"} />
-                  {isSoon ? (
-                    <span className="starter-badge soon">Coming Soon</span>
-                  ) : isSelected ? (
-                    <CheckIcon size={13} className="text-green" />
-                  ) : (
-                    <span className="starter-badge ready">Ready</span>
-                  )}
-                </div>
-                <strong className="template-pill-name">{tmpl.name}</strong>
-                <span className="template-pill-desc">{tmpl.desc}</span>
-              </div>
-            );
-          })}
-        </div>
       </div>
 
       <div className="new-project-split-layout">
@@ -449,33 +316,49 @@ export default function NewProjectPage({ navigate, searchParams }) {
               </div>
             </div>
 
-            {/* Runtime Selection Cards */}
+            {/* Build Engine: Strict Dockerfile */}
             <div className="form-field-block">
-              <label>Application Runtime & Framework</label>
-              <div className="runtime-cards-grid">
-                {RUNTIME_OPTIONS.map((rt) => {
-                  const isSelected = selectedRuntime === rt.id;
-                  const IconComp = rt.Icon;
-                  return (
-                    <div
-                      key={rt.id}
-                      className={`runtime-card-option ${isSelected ? "selected" : ""} ${rt.disabled ? "disabled" : ""}`}
-                      onClick={() => handleRuntimeSelect(rt)}
-                      role="button"
-                      tabIndex={rt.disabled ? -1 : 0}
-                      title={rt.disabled ? "Python container runtime is scheduled for Phase D" : rt.label}
-                      style={rt.disabled ? { opacity: 0.5, cursor: "not-allowed" } : {}}
-                    >
-                      <div className="runtime-card-top">
-                        <IconComp size={20} className="runtime-card-icon" />
-                        {isSelected && <CheckIcon size={14} className="runtime-selected-check" />}
-                        {rt.disabled && <span className="starter-badge soon">Coming Soon</span>}
-                      </div>
-                      <strong className="runtime-card-name">{rt.label}</strong>
-                      <small className="runtime-card-desc">{rt.desc}</small>
+              <label>Build Engine & Runtime</label>
+              <div
+                className="runtime-docker-badge-card"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "0.875rem 1rem",
+                  borderRadius: "8px",
+                  border: "1px solid #27272a",
+                  background: "#09090b",
+                  gap: "1rem",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                  <div
+                    style={{
+                      width: "36px",
+                      height: "36px",
+                      borderRadius: "6px",
+                      background: "rgba(16, 185, 129, 0.1)",
+                      border: "1px solid rgba(16, 185, 129, 0.2)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <DockerIcon size={20} className="text-green" />
+                  </div>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <strong style={{ fontSize: "0.875rem", color: "#f4f4f5" }}>Root Dockerfile Engine</strong>
+                      <span className="starter-badge ready" style={{ fontSize: "0.65rem" }}>Strict Dockerfile</span>
                     </div>
-                  );
-                })}
+                    <small style={{ fontSize: "0.75rem", color: "#71717a", display: "block", marginTop: "2px" }}>
+                      DeployForge strictly builds using the repository&apos;s root <code>Dockerfile</code>. Any framework or language is packaged into an isolated OCI container.
+                    </small>
+                  </div>
+                </div>
+                <CheckIcon size={16} className="text-green" style={{ flexShrink: 0 }} />
               </div>
             </div>
 

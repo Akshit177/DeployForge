@@ -146,17 +146,17 @@ describe("Phase C: Docker Daemon Integration & Nginx Data Plane Suite", () => {
       assert.equal(fs.existsSync(ws), false);
     });
 
-    it("detects Node.js project and generates Dockerfile.node", () => {
-      const depId = "node-detection-test";
+    it("detects root Dockerfile in workspace", () => {
+      const depId = "dockerfile-detection-test";
       const ws = getWorkspacePath(depId);
       fs.writeFileSync(
-        path.join(ws, "package.json"),
-        JSON.stringify({ name: "app", scripts: { start: "node index.js" } })
+        path.join(ws, "Dockerfile"),
+        "FROM node:20-alpine\nWORKDIR /app\nUSER node\nEXPOSE 3000\nCMD [\"node\", \"index.js\"]"
       );
 
       const info = detectRuntime(ws);
-      assert.equal(info.runtime, "node");
-      assert.equal(info.hasCustomDockerfile, false);
+      assert.equal(info.runtime, "dockerfile");
+      assert.equal(info.hasCustomDockerfile, true);
 
       const dfPath = prepareWorkspaceDockerfile(ws, info);
       assert.ok(fs.existsSync(dfPath));
@@ -167,19 +167,14 @@ describe("Phase C: Docker Daemon Integration & Nginx Data Plane Suite", () => {
       cleanupWorkspace(ws);
     });
 
-    it("detects static site and generates Dockerfile.static", () => {
-      const depId = "static-detection-test";
+    it("strictly rejects repository without root Dockerfile", () => {
+      const depId = "no-dockerfile-test";
       const ws = getWorkspacePath(depId);
       fs.writeFileSync(path.join(ws, "index.html"), "<h1>Static Test</h1>");
 
-      const info = detectRuntime(ws);
-      assert.equal(info.runtime, "static");
-      assert.equal(info.hasCustomDockerfile, false);
-
-      const dfPath = prepareWorkspaceDockerfile(ws, info);
-      assert.ok(fs.existsSync(dfPath));
-      const content = fs.readFileSync(dfPath, "utf-8");
-      assert.ok(content.includes("FROM nginx:alpine"));
+      assert.throws(() => {
+        detectRuntime(ws);
+      }, /No root Dockerfile found in repository/);
 
       cleanupWorkspace(ws);
     });

@@ -175,28 +175,11 @@ async function processJob(jobData, messageId) {
       }
     }
 
-    // Ensure workspace contains runnable source files (fallback for mock repos/offline dev/tests)
-    const hasFiles =
-      fs.existsSync(path.join(workspacePath, "package.json")) ||
-      fs.existsSync(path.join(workspacePath, "Dockerfile")) ||
-      fs.existsSync(path.join(workspacePath, "index.html"));
-
-    if (!hasFiles) {
+    // Ensure workspace contains Dockerfile (fallback for mock repos/offline dev/tests in simulator mode)
+    if (getMode() === "simulator" && !fs.existsSync(path.join(workspacePath, "Dockerfile"))) {
       fs.writeFileSync(
-        path.join(workspacePath, "package.json"),
-        JSON.stringify(
-          {
-            name: projectName.toLowerCase().replace(/[^a-z0-9_]/g, "-"),
-            version: "1.0.0",
-            scripts: { start: "node index.js" },
-          },
-          null,
-          2
-        )
-      );
-      fs.writeFileSync(
-        path.join(workspacePath, "index.js"),
-        `const http = require('http'); const port = process.env.PORT || ${configuredPort}; http.createServer((_, res) => res.end('DeployForge App: ${projectName}')).listen(port, () => console.log('Listening on port ' + port));`
+        path.join(workspacePath, "Dockerfile"),
+        `FROM alpine:latest\nEXPOSE ${configuredPort}\nCMD ["echo", "DeployForge App: ${projectName}"]\n`
       );
     }
 

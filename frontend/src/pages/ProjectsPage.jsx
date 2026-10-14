@@ -21,7 +21,6 @@ import {
   TrashIcon,
   SpinnerIcon,
   PlayIcon,
-  ArrowRightIcon,
 } from "../components/common/TechIcons.jsx";
 
 function timeAgo(dateString) {
@@ -498,7 +497,7 @@ export default function ProjectsPage({ navigate }) {
             <p>
               {query || activeFilter !== "All"
                 ? "No applications matched your search or status filter."
-                : "You haven't imported any applications yet. Connect a GitHub repository or select a template to launch your first service."}
+                : "You haven't imported any applications yet. Connect a GitHub repository containing a root Dockerfile to launch your first service."}
             </p>
             {query || activeFilter !== "All" ? (
               <button
@@ -512,82 +511,14 @@ export default function ProjectsPage({ navigate }) {
                 Reset filters
               </button>
             ) : (
-              <>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => navigate("/projects/new")}
-                >
-                  <PlusIcon size={14} />
-                  <span>Create your first project</span>
-                </button>
-
-                {/* Quick-start Starter Templates */}
-                <div className="empty-starter-section">
-                  <h4 className="empty-starter-title">Or launch with a starter template</h4>
-                  <div className="empty-templates-grid">
-                    {/* Node.js Express */}
-                    <div className="starter-card">
-                      <div className="starter-card-header">
-                        <NodeIcon size={22} className="text-green" />
-                        <span className="starter-badge ready">Ready</span>
-                      </div>
-                      <h5 className="starter-title">Node.js Express</h5>
-                      <p className="starter-desc">
-                        Production-ready REST API with Express, internal port :3000, and automated health checks.
-                      </p>
-                      <button
-                        type="button"
-                        className="starter-btn"
-                        onClick={() => navigate("/projects/new?template=node")}
-                      >
-                        <span>Use Template</span>
-                        <ArrowRightIcon size={12} />
-                      </button>
-                    </div>
-
-                    {/* Static Site */}
-                    <div className="starter-card">
-                      <div className="starter-card-header">
-                        <HtmlIcon size={22} className="text-amber" />
-                        <span className="starter-badge ready">Ready</span>
-                      </div>
-                      <h5 className="starter-title">Static Web Application</h5>
-                      <p className="starter-desc">
-                        High-performance static site served by Nginx Alpine on internal port :80 with zero build config.
-                      </p>
-                      <button
-                        type="button"
-                        className="starter-btn"
-                        onClick={() => navigate("/projects/new?template=static")}
-                      >
-                        <span>Use Template</span>
-                        <ArrowRightIcon size={12} />
-                      </button>
-                    </div>
-
-                    {/* Python FastAPI - Coming Soon */}
-                    <div className="starter-card disabled">
-                      <div className="starter-card-header">
-                        <PythonIcon size={22} />
-                        <span className="starter-badge soon">Coming Soon</span>
-                      </div>
-                      <h5 className="starter-title">Python FastAPI</h5>
-                      <p className="starter-desc">
-                        Modern async Python service with Uvicorn. Container runtime scheduled for Phase D.
-                      </p>
-                      <button
-                        type="button"
-                        className="starter-btn"
-                        disabled
-                        title="Python runtime container support is arriving in Phase D"
-                      >
-                        <span>Coming Soon</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => navigate("/projects/new")}
+              >
+                <PlusIcon size={14} />
+                <span>Create your first project</span>
+              </button>
             )}
           </div>
         )}

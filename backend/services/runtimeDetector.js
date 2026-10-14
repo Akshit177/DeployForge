@@ -2,8 +2,6 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const TEMPLATES_DIR = path.join(__dirname, "../templates");
-
 /**
  * Validate that a deploymentId is a clean identifier (prevents path traversal)
  * @param {string} deploymentId
@@ -84,7 +82,8 @@ function cleanupWorkspace(workspacePath) {
 }
 
 /**
- * Detect runtime and build requirements for a cloned repository workspace
+ * Detect runtime and build requirements for a cloned repository workspace.
+ * Strict Dockerfile Policy: DeployForge requires every repository to supply a root Dockerfile.
  * @param {string} workspacePath
  * @returns {object} Runtime detection metadata
  */
@@ -93,7 +92,6 @@ function detectRuntime(workspacePath) {
     throw new Error(`Workspace path does not exist: '${workspacePath}'`);
   }
 
-  // 1. Check for user-provided Dockerfile
   const dockerfilePath = path.join(workspacePath, "Dockerfile");
   if (fs.existsSync(dockerfilePath)) {
     return {
@@ -104,74 +102,23 @@ function detectRuntime(workspacePath) {
     };
   }
 
-  // 2. Check for Node.js (package.json)
-  const pkgPath = path.join(workspacePath, "package.json");
-  if (fs.existsSync(pkgPath)) {
-    let pkg = {};
-    try {
-      pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    } catch (parseErr) {
-      console.warn("Could not parse package.json:", parseErr.message);
-    }
-
-    const startScript = pkg.scripts && pkg.scripts.start;
-    const hasServerJs = fs.existsSync(path.join(workspacePath, "server.js"));
-    const hasIndexJs = fs.existsSync(path.join(workspacePath, "index.js"));
-    const hasAppJs = fs.existsSync(path.join(workspacePath, "app.js"));
-
-    return {
-      runtime: "node",
-      hasCustomDockerfile: false,
-      templateFile: "Dockerfile.node",
-      detectedPort: 3000,
-      startCommand: startScript ? "npm start" : hasServerJs ? "node server.js" : hasIndexJs ? "node index.js" : hasAppJs ? "node app.js" : "npm start",
-    };
-  }
-
-  // 3. Check for Static Site (index.html)
-  const htmlPath = path.join(workspacePath, "index.html");
-  if (fs.existsSync(htmlPath)) {
-    return {
-      runtime: "static",
-      hasCustomDockerfile: false,
-      templateFile: "Dockerfile.static",
-      detectedPort: 80,
-    };
-  }
-
-  // 4. Unknown/Unsupported runtime
   throw new Error(
-    "Unable to detect project runtime. Please supply a Dockerfile in your repository or ensure standard Node.js (package.json) or static (index.html) files exist."
+    "No root Dockerfile found in repository. DeployForge requires every repository to provide a valid Dockerfile in its root directory."
   );
 }
 
 /**
- * Ensure Dockerfile is ready in workspace (either validated user Dockerfile or copied template)
+ * Ensure Dockerfile is ready in workspace
  * @param {string} workspacePath
  * @param {object} runtimeInfo
  * @returns {string} Absolute path to Dockerfile
  */
 function prepareWorkspaceDockerfile(workspacePath, runtimeInfo) {
-  if (runtimeInfo.hasCustomDockerfile) {
-    const customPath = path.join(workspacePath, "Dockerfile");
-    if (!fs.existsSync(customPath)) {
-      throw new Error(`Expected custom Dockerfile at '${customPath}', but file was not found.`);
-    }
-    return customPath;
+  const customPath = path.join(workspacePath, "Dockerfile");
+  if (!fs.existsSync(customPath)) {
+    throw new Error(`Expected root Dockerfile at '${customPath}', but file was not found.`);
   }
-
-  if (!runtimeInfo.templateFile) {
-    throw new Error(`No template file configured for runtime '${runtimeInfo.runtime}'`);
-  }
-
-  const templateSource = path.join(TEMPLATES_DIR, runtimeInfo.templateFile);
-  if (!fs.existsSync(templateSource)) {
-    throw new Error(`Managed template not found: '${templateSource}'`);
-  }
-
-  const targetPath = path.join(workspacePath, "Dockerfile");
-  fs.copyFileSync(templateSource, targetPath);
-  return targetPath;
+  return customPath;
 }
 
 module.exports = {
@@ -181,5 +128,4 @@ module.exports = {
   cleanupWorkspace,
   detectRuntime,
   prepareWorkspaceDockerfile,
-  TEMPLATES_DIR,
 };
