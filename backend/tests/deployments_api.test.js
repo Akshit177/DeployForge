@@ -94,7 +94,8 @@ async function runTestSuite() {
     assert(listRes1.status === 200, "GET /api/deployments returned 200");
     assert(listData1.deployments.length >= 1, "Initial deployment was automatically created in the pipeline");
     const initialDeploy = listData1.deployments[0];
-    assert(initialDeploy.status === "Queued", "Initial deployment is Queued");
+    const initialStatus = (initialDeploy.status || "").toUpperCase();
+    assert(initialStatus === "INITIATED" || initialStatus === "QUEUED", "Initial deployment is INITIATED or QUEUED");
     assert(initialDeploy.project_id === projectId, "Initial deployment belongs to the project");
     const deployId1 = initialDeploy.id;
     const deployNum1 = initialDeploy.deployment_number;

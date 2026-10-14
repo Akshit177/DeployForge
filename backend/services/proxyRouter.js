@@ -59,7 +59,7 @@ async function syncFromDatabase() {
       `SELECT p.id AS project_id, p.name AS project_name, p.domain, p.port,
               d.id AS deployment_id, d.container_id, d.status AS deployment_status
        FROM projects p
-       JOIN deployments d ON d.project_id = p.id AND d.status = 'Running'
+       JOIN deployments d ON d.project_id = p.id AND UPPER(d.status) = 'RUNNING'
        ORDER BY d.created_at DESC`
     );
 

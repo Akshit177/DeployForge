@@ -82,7 +82,7 @@ async function runTestSuite() {
         `SELECT status, duration_seconds, container_id FROM deployments WHERE id = $1`,
         [deployment.id]
       );
-      if (res.rows[0].status === "Running") {
+      if (res.rows[0]?.status && res.rows[0].status.toUpperCase() === "RUNNING") {
         finalDep = res.rows[0];
         break;
       }
@@ -90,7 +90,7 @@ async function runTestSuite() {
     }
 
     assert(Boolean(finalDep), "Worker successfully consumed and processed target job from Redis Stream");
-    assert(finalDep.status === "Running", "Deployment status transitioned to 'Running'");
+    assert(finalDep.status.toUpperCase() === "RUNNING", "Deployment status transitioned to 'RUNNING'");
     assert(Boolean(finalDep.container_id && finalDep.container_id.startsWith("c_")), "Worker generated and assigned container ID");
     assert(finalDep.duration_seconds >= 0, "Worker calculated duration seconds");
 
@@ -99,7 +99,7 @@ async function runTestSuite() {
       `SELECT status FROM projects WHERE id = $1`,
       [project.id]
     );
-    assert(finalProjRes.rows[0].status === "Running", "Parent project status updated to 'Running'");
+    assert(finalProjRes.rows[0]?.status && finalProjRes.rows[0].status.toUpperCase() === "RUNNING", "Parent project status updated to 'RUNNING'");
 
     // 7. Verify worker generated logs in PostgreSQL
     const logsRes = await pool.query(

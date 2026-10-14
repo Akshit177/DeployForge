@@ -14,6 +14,7 @@ const logRoutes = require("../routes/logs.js");
 const settingsRoutes = require("../routes/settings.js");
 const routingRoutes = require("../routes/routing.js");
 const { pollOnce } = require("../workers/deploymentWorker.js");
+const { relayPendingEvents } = require("../services/outboxRelay.js");
 
 function createApp() {
   const app = express();
@@ -97,21 +98,32 @@ async function runEndToEndPlatformVerification() {
     const project = (await projRes.json()).project;
     assert(project.domain.includes(".deployforge.app"), "Project assigned valid subdomain");
 
-    // Worker poll to process the initial queued deployment
-    console.log("  Executing worker loop to process pipeline...");
-    let processed = 0;
-    for (let i = 0; i < 5; i++) {
-      const count = await pollOnce();
-      if (count > 0) processed += count;
-    }
-    assert(processed >= 1, "Worker consumed and processed initial deployment job from stream");
+    // Relay outbox event to Redis Stream
+    await relayPendingEvents();
 
-    // Verify project transitioned to Running
+    // Verify deployment pipeline processing transitions project to RUNNING
+    console.log("  Executing worker loop to process pipeline...");
+    let isRunning = false;
+    for (let i = 0; i < 15; i++) {
+      await pollOnce();
+      const checkProj = await pool.query(
+        `SELECT status FROM projects WHERE id = $1`,
+        [project.id]
+      );
+      if (checkProj.rows[0]?.status && checkProj.rows[0].status.toUpperCase() === "RUNNING") {
+        isRunning = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert(isRunning, "Worker consumed and processed initial deployment job from stream");
+
+    // Verify project transitioned to Running via API
     const checkProjRes = await fetch(`${baseUrl}/api/projects/${project.id}`, {
       headers: { Cookie: cookie },
     });
     const updatedProj = (await checkProjRes.json()).project;
-    assert(updatedProj.status === "Running", "Project status transitioned to 'Running'");
+    assert((updatedProj.status || "").toUpperCase() === "RUNNING", "Project status transitioned to 'Running'");
 
     // -------------------------------------------------------------------------
     // Phase 3: Manual Deployment & Pipeline Execution
@@ -128,15 +140,27 @@ async function runEndToEndPlatformVerification() {
     });
     assert(manualDepRes.status === 201, "Manual deployment queued to Redis Stream (201 Created)");
     const manualDep = (await manualDepRes.json()).deployment;
-    assert(manualDep.status === "Queued", "New manual deployment starts in 'Queued' status");
+    const manualInitStatus = (manualDep.status || "").toUpperCase();
+    assert(manualInitStatus === "INITIATED" || manualInitStatus === "QUEUED", "New manual deployment starts in 'INITIATED' or 'QUEUED' status");
+
+    // Relay manual deployment outbox event to Redis Stream
+    await relayPendingEvents();
 
     // Process manual deployment via worker
-    await pollOnce();
-    const checkDepRes = await fetch(`${baseUrl}/api/deployments/${manualDep.id}`, {
-      headers: { Cookie: cookie },
-    });
-    const completedDep = (await checkDepRes.json()).deployment;
-    assert(completedDep.status === "Running", "Manual deployment transitioned to 'Running'");
+    let completedDep = null;
+    for (let i = 0; i < 15; i++) {
+      await pollOnce();
+      const checkDepRes = await fetch(`${baseUrl}/api/deployments/${manualDep.id}`, {
+        headers: { Cookie: cookie },
+      });
+      const data = await checkDepRes.json();
+      if (data.deployment?.status && data.deployment.status.toUpperCase() === "RUNNING") {
+        completedDep = data.deployment;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert(Boolean(completedDep), "Manual deployment transitioned to 'Running'");
     assert(typeof completedDep.container_id === "string", "Worker assigned container ID");
 
     // -------------------------------------------------------------------------

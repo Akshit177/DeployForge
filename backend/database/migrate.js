@@ -12,6 +12,7 @@ async function runMigrations() {
     await pool.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS github_connected BOOLEAN DEFAULT false;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb;
+      ALTER TABLE deployments ALTER COLUMN status SET DEFAULT 'INITIATED';
     `);
     console.log("Database schema migrations applied successfully.");
   } catch (error) {

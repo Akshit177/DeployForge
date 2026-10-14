@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS deployments (
     commit_hash VARCHAR(40) DEFAULT 'HEAD' NOT NULL,
     commit_message TEXT DEFAULT 'Deploy latest changes' NOT NULL,
     branch VARCHAR(100) DEFAULT 'main' NOT NULL,
-    status VARCHAR(50) DEFAULT 'Queued' NOT NULL,
+    status VARCHAR(50) DEFAULT 'INITIATED' NOT NULL,
     trigger VARCHAR(50) DEFAULT 'manual' NOT NULL,
     environment VARCHAR(50) DEFAULT 'production' NOT NULL,
     url VARCHAR(255),
@@ -110,3 +110,20 @@ CREATE TABLE IF NOT EXISTS custom_domains (
 
 CREATE INDEX IF NOT EXISTS idx_domains_user_id ON custom_domains(user_id);
 CREATE INDEX IF NOT EXISTS idx_domains_project_id ON custom_domains(project_id);
+
+-- Transactional Outbox Events table (guaranteed delivery to Redis)
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    aggregate_type VARCHAR(50) NOT NULL,
+    aggregate_id UUID NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(30) DEFAULT 'PENDING' NOT NULL,
+    retry_count INT DEFAULT 0 NOT NULL,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_status_created ON outbox_events(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_outbox_aggregate ON outbox_events(aggregate_type, aggregate_id);

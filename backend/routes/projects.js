@@ -2,6 +2,7 @@ const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
 const { publishDeploymentJob } = require("../services/queue.js");
+const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 
 const router = express.Router();
 
@@ -125,23 +126,27 @@ router.post("/", async (req, res) => {
   const varsToSave = Array.isArray(envVars) ? envVars : Array.isArray(env_vars) ? env_vars : [];
   const domain = `${projectSlug}.deployforge.app`;
 
+  const client = await pool.connect();
   try {
+    await client.query("BEGIN");
+
     // Check if user already has a project with this name
-    const existing = await pool.query(
+    const existing = await client.query(
       `SELECT id FROM projects WHERE user_id = $1 AND name = $2`,
       [req.user.id, projectSlug]
     );
 
     if (existing.rows.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(409).json({
         message: `You already have a project named "${projectSlug}". Please choose a different name.`,
       });
     }
 
-    const insertResult = await pool.query(
+    const insertResult = await client.query(
       `INSERT INTO projects (
         user_id, name, repository_url, branch, runtime, port, auto_deploy, env_vars, status, domain, latest_commit
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'INITIATED', $9, $10)
       RETURNING *`,
       [
         req.user.id,
@@ -152,7 +157,6 @@ router.post("/", async (req, res) => {
         internalPort,
         isAutoDeploy,
         JSON.stringify(varsToSave),
-        "Queued",
         domain,
         "main",
       ]
@@ -160,45 +164,56 @@ router.post("/", async (req, res) => {
 
     const newProject = insertResult.rows[0];
 
-    // Automatically queue initial deployment for the newly created project
-    try {
-      const initialDepRes = await pool.query(
-        `INSERT INTO deployments (
-          project_id, user_id, commit_hash, commit_message, branch, status, trigger, environment, url
-        ) VALUES ($1, $2, $3, $4, $5, 'Queued', 'initial', 'production', $6)
-        RETURNING *`,
-        [
-          newProject.id,
-          req.user.id,
-          newProject.latest_commit || "HEAD",
-          "Initial project import",
-          newProject.branch,
-          domain,
-        ]
-      );
-      if (initialDepRes.rows.length > 0) {
-        const initDep = initialDepRes.rows[0];
-        await publishDeploymentJob({
-          deployment_id: initDep.id,
-          project_id: newProject.id,
-          user_id: req.user.id,
-          repo_url: newProject.repository_url,
-          branch: newProject.branch,
-          commit_hash: newProject.latest_commit,
-          runtime: newProject.runtime,
-          port: newProject.port,
-          trigger: "initial",
-        });
-      }
-    } catch (deployErr) {
-      console.warn("Could not insert/dispatch initial deployment:", deployErr.message);
-    }
+    // Atomically create initial deployment with status INITIATED
+    const initialDepRes = await client.query(
+      `INSERT INTO deployments (
+        project_id, user_id, commit_hash, commit_message, branch, status, trigger, environment, url
+      ) VALUES ($1, $2, $3, $4, $5, 'INITIATED', 'initial', 'production', $6)
+      RETURNING *`,
+      [
+        newProject.id,
+        req.user.id,
+        newProject.latest_commit || "HEAD",
+        "Initial project import",
+        newProject.branch,
+        domain,
+      ]
+    );
+
+    const initDep = initialDepRes.rows[0];
+
+    // Atomically insert Outbox Event (guaranteed delivery to Redis)
+    const outboxPayload = {
+      deployment_id: initDep.id,
+      project_id: newProject.id,
+      user_id: req.user.id,
+      repo_url: newProject.repository_url,
+      branch: newProject.branch,
+      commit_hash: newProject.latest_commit || "HEAD",
+      runtime: newProject.runtime,
+      port: newProject.port,
+      trigger: "initial",
+      deployment_number: initDep.deployment_number,
+    };
+
+    await client.query(
+      `INSERT INTO outbox_events (
+        aggregate_type, aggregate_id, event_type, payload, status
+      ) VALUES ('DEPLOYMENT', $1, 'DEPLOYMENT_INITIATED', $2::jsonb, 'PENDING')`,
+      [initDep.id, JSON.stringify(outboxPayload)]
+    );
+
+    await client.query("COMMIT");
+
+    // Immediate post-commit trigger for sub-millisecond dispatch
+    triggerOutboxRelay();
 
     return res.status(201).json({
       message: `Project ${projectSlug} created successfully.`,
       project: formatProject(newProject),
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     if (error.code === "23505") {
       return res.status(409).json({
         message: `You already have a project named "${projectSlug}". Please choose a different name.`,
@@ -206,6 +221,8 @@ router.post("/", async (req, res) => {
     }
     console.error("Failed to create project:", error);
     return res.status(500).json({ message: "Unable to create project right now." });
+  } finally {
+    client.release();
   }
 });
 

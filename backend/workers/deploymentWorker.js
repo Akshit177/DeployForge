@@ -65,13 +65,22 @@ async function processJob(jobData, messageId) {
   if (depRes.rows.length === 0) return;
   const dep = depRes.rows[0];
 
-  // 1. Transition to Building
+  // Idempotency check: if already RUNNING or CANCELLED, acknowledge and skip
+  const currentStatus = (dep.status || "").toUpperCase();
+  if (currentStatus === "RUNNING" || currentStatus === "CANCELLED" || currentStatus === "FAILED") {
+    try {
+      await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
+    } catch (_) {}
+    return;
+  }
+
+  // 1. Transition to CLONING
   await pool.query(
-    `UPDATE deployments SET status = 'Building', updated_at = NOW() WHERE id = $1`,
+    `UPDATE deployments SET status = 'CLONING', updated_at = NOW() WHERE id = $1`,
     [deployment_id]
   );
   await pool.query(
-    `UPDATE projects SET status = 'Building', updated_at = NOW() WHERE id = $1`,
+    `UPDATE projects SET status = 'CLONING', updated_at = NOW() WHERE id = $1`,
     [project_id]
   );
   await recordWorkerLog(
@@ -87,8 +96,20 @@ async function processJob(jobData, messageId) {
     project_id,
     user_id,
     "STEP",
-    "build",
+    "clone",
     `Cloning ${repo_url || dep.project_name} (branch: ${branch || "main"}, commit: ${(commit_hash || "HEAD").slice(0, 7)})`
+  );
+
+  await sleep(300);
+
+  // 2. Transition to BUILDING
+  await pool.query(
+    `UPDATE deployments SET status = 'BUILDING', updated_at = NOW() WHERE id = $1`,
+    [deployment_id]
+  );
+  await pool.query(
+    `UPDATE projects SET status = 'BUILDING', updated_at = NOW() WHERE id = $1`,
+    [project_id]
   );
   await recordWorkerLog(
     deployment_id,
@@ -96,15 +117,19 @@ async function processJob(jobData, messageId) {
     user_id,
     "STEP",
     "build",
-    `Detected runtime: ${runtime || "node"} · Docker build layer verified`
+    `Building Docker image for runtime: ${runtime || "node"} · Layers verified`
   );
 
-  await sleep(400);
+  await sleep(300);
 
-  // 2. Transition to Deploying
+  // 3. Transition to STARTING
   await pool.query(
-    `UPDATE deployments SET status = 'Deploying', updated_at = NOW() WHERE id = $1`,
+    `UPDATE deployments SET status = 'STARTING', updated_at = NOW() WHERE id = $1`,
     [deployment_id]
+  );
+  await pool.query(
+    `UPDATE projects SET status = 'STARTING', updated_at = NOW() WHERE id = $1`,
+    [project_id]
   );
   await recordWorkerLog(
     deployment_id,
@@ -112,7 +137,7 @@ async function processJob(jobData, messageId) {
     user_id,
     "STEP",
     "deploy",
-    `Spawning isolated container on port :${port || 3000}`
+    `Creating and starting isolated container on port :${port || 3000}`
   );
 
   const probe = await probeContainerEndpoint({ host: "127.0.0.1", port: port || 3000 });
@@ -127,13 +152,13 @@ async function processJob(jobData, messageId) {
 
   await sleep(300);
 
-  // 3. Transition to Running
+  // 4. Transition to RUNNING
   const containerId = `c_${deployment_id.replace(/-/g, "").slice(0, 12)}`;
   const durationSec = Math.max(1, Math.floor((Date.now() - new Date(dep.created_at).getTime()) / 1000));
 
   await pool.query(
     `UPDATE deployments
-     SET status = 'Running',
+     SET status = 'RUNNING',
          duration_seconds = $1,
          container_id = $2,
          updated_at = NOW()
@@ -141,7 +166,7 @@ async function processJob(jobData, messageId) {
     [durationSec, containerId, deployment_id]
   );
   await pool.query(
-    `UPDATE projects SET status = 'Running', updated_at = NOW() WHERE id = $1`,
+    `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
     [project_id]
   );
 

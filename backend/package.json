@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node server.js",
     "migrate": "node database/migrate.js",
-    "test": "node tests/projects_api.test.js && node tests/deployments_api.test.js && node tests/logs_api.test.js && node tests/env_vars_api.test.js && node tests/queue_worker.test.js && node tests/settings_api.test.js && node tests/health_and_routing.test.js && node tests/e2e_platform.test.js",
+    "test": "node tests/projects_api.test.js && node tests/deployments_api.test.js && node tests/logs_api.test.js && node tests/env_vars_api.test.js && node tests/queue_worker.test.js && node tests/settings_api.test.js && node tests/health_and_routing.test.js && node tests/outbox_pattern.test.js && node tests/e2e_platform.test.js",
+    "test:outbox": "node tests/outbox_pattern.test.js",
     "test:e2e": "node tests/e2e_platform.test.js"
   },
   "dependencies": {

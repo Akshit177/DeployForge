@@ -73,7 +73,7 @@ async function checkProjectHealth(projectId, userId) {
     `SELECT p.id, p.name, p.domain, p.port, p.status AS project_status,
             d.id AS deployment_id, d.container_id, d.status AS deployment_status, d.duration_seconds
      FROM projects p
-     LEFT JOIN deployments d ON d.project_id = p.id AND d.status = 'Running'
+     LEFT JOIN deployments d ON d.project_id = p.id AND UPPER(d.status) = 'RUNNING'
      WHERE p.id = $1 AND p.user_id = $2
      ORDER BY d.created_at DESC
      LIMIT 1`,

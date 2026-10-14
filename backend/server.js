@@ -45,11 +45,15 @@ app.use((req, res, next) => {
 });
 
 const { startWorkerLoop } = require("./workers/deploymentWorker.js");
+const { startOutboxRelayLoop } = require("./services/outboxRelay.js");
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server started running on port ${PORT}`);
   syncFromDatabase().catch((err) => console.warn("Proxy sync warning:", err.message));
+  if (process.env.ENABLE_OUTBOX !== "false") {
+    startOutboxRelayLoop();
+  }
   if (process.env.ENABLE_WORKER !== "false") {
     startWorkerLoop().catch((err) => console.warn("Worker loop warning:", err.message));
   }

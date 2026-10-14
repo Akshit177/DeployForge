@@ -1,6 +1,6 @@
 const express = require("express");
 const { authenticateToken } = require("../middleware/auth.js");
-const { getRoutingTable, generateNginxConfig, resolveDomain } = require("../services/proxyRouter.js");
+const { getRoutingTable, generateNginxConfig, resolveDomain, syncFromDatabase } = require("../services/proxyRouter.js");
 const { checkProjectHealth } = require("../services/healthCheck.js");
 
 const router = express.Router();
@@ -9,7 +9,8 @@ const router = express.Router();
  * GET /api/routing/table
  * Inspect the active reverse proxy upstream routing table and generated Nginx configuration
  */
-router.get("/table", (req, res) => {
+router.get("/table", async (req, res) => {
+  await syncFromDatabase();
   const routes = getRoutingTable();
   const nginxConfig = generateNginxConfig();
 
@@ -24,9 +25,13 @@ router.get("/table", (req, res) => {
  * GET /api/routing/resolve/:domain
  * Test domain resolution against the dynamic routing table
  */
-router.get("/resolve/:domain", (req, res) => {
+router.get("/resolve/:domain", async (req, res) => {
   const { domain } = req.params;
-  const match = resolveDomain(domain);
+  let match = resolveDomain(domain);
+  if (!match) {
+    await syncFromDatabase();
+    match = resolveDomain(domain);
+  }
 
   if (!match) {
     return res.status(404).json({

@@ -3,6 +3,7 @@ const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
+const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 
 const router = express.Router();
 
@@ -148,7 +149,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /api/deployments - Trigger/queue a new deployment
+// POST /api/deployments - Trigger/queue a new deployment via Transactional Outbox
 router.post("/", async (req, res) => {
   const {
     project_id,
@@ -163,14 +164,18 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ message: "A valid project_id is required." });
   }
 
+  const client = await pool.connect();
   try {
+    await client.query("BEGIN");
+
     // Verify user owns the project
-    const projectRes = await pool.query(
+    const projectRes = await client.query(
       `SELECT * FROM projects WHERE id = $1 AND user_id = $2`,
       [project_id, req.user.id]
     );
 
     if (projectRes.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ message: "Project not found or unauthorized." });
     }
 
@@ -181,10 +186,10 @@ router.post("/", async (req, res) => {
     const deployEnv = String(environment).trim() || "production";
     const deployTrigger = String(trigger).trim() || "manual";
 
-    const insertResult = await pool.query(
+    const insertResult = await client.query(
       `INSERT INTO deployments (
         project_id, user_id, commit_hash, commit_message, branch, status, trigger, environment, url
-      ) VALUES ($1, $2, $3, $4, $5, 'Queued', $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, 'INITIATED', $6, $7, $8)
       RETURNING *`,
       [
         project.id,
@@ -200,39 +205,48 @@ router.post("/", async (req, res) => {
 
     const newDeploy = insertResult.rows[0];
 
-    // Update project state and commit
-    await pool.query(
+    // Atomically update project state to INITIATED
+    await client.query(
       `UPDATE projects
-       SET status = 'Queued', latest_commit = $1, updated_at = NOW()
+       SET status = 'INITIATED', latest_commit = $1, updated_at = NOW()
        WHERE id = $2`,
       [deployCommit, project.id]
     );
 
-    await recordLog(
+    // Atomically insert Outbox Event (guaranteed delivery to Redis)
+    const outboxPayload = {
+      deployment_id: newDeploy.id,
+      project_id: project.id,
+      user_id: req.user.id,
+      repo_url: project.repository_url,
+      branch: deployBranch,
+      commit_hash: deployCommit,
+      runtime: project.runtime,
+      port: project.port,
+      trigger: deployTrigger,
+      deployment_number: newDeploy.deployment_number,
+    };
+
+    await client.query(
+      `INSERT INTO outbox_events (
+        aggregate_type, aggregate_id, event_type, payload, status
+      ) VALUES ('DEPLOYMENT', $1, 'DEPLOYMENT_INITIATED', $2::jsonb, 'PENDING')`,
+      [newDeploy.id, JSON.stringify(outboxPayload)]
+    );
+
+    await client.query("COMMIT");
+
+    // Immediate post-commit trigger for sub-millisecond dispatch
+    triggerOutboxRelay();
+
+    recordLog(
       newDeploy.id,
       project.id,
       req.user.id,
       "INFO",
       "system",
-      `Deployment #${newDeploy.deployment_number} queued (${deployBranch} · ${deployCommit.slice(0, 7)})`
-    );
-
-    // Publish build job to Redis Streams queue
-    try {
-      await publishDeploymentJob({
-        deployment_id: newDeploy.id,
-        project_id: project.id,
-        user_id: req.user.id,
-        repo_url: project.repository_url,
-        branch: deployBranch,
-        commit_hash: deployCommit,
-        runtime: project.runtime,
-        port: project.port,
-        trigger: deployTrigger,
-      });
-    } catch (qErr) {
-      console.warn("Queue publish warning:", qErr.message);
-    }
+      `Deployment #${newDeploy.deployment_number} initiated (${deployBranch} · ${deployCommit.slice(0, 7)})`
+    ).catch(() => {});
 
     return res.status(201).json({
       message: `Deployment #${newDeploy.deployment_number} queued successfully.`,
@@ -245,8 +259,11 @@ router.post("/", async (req, res) => {
       }),
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Failed to trigger deployment:", error);
     return res.status(500).json({ message: "Unable to trigger deployment right now." });
+  } finally {
+    client.release();
   }
 });
 
@@ -404,7 +421,8 @@ router.post("/:id/cancel", async (req, res) => {
     }
 
     const current = check.rows[0];
-    if (current.status !== "Queued" && current.status !== "Building" && current.status !== "Deploying") {
+    const normStatus = (current.status || "").toUpperCase();
+    if (normStatus === "RUNNING" || normStatus === "FAILED" || normStatus === "CANCELLED" || normStatus === "STOPPED") {
       return res.status(400).json({
         message: `Deployment cannot be cancelled because its current status is "${current.status}".`,
       });
