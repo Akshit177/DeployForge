@@ -1,5 +1,7 @@
 const pool = require("../config/db.js");
+const redis = require("../config/redis.js");
 const { verifyAccessToken } = require("../services/auth.js");
+const { getSession } = require("../services/sessionService.js");
 
 async function authenticateToken(req, res, next) {
     const token = req.cookies?.token;
@@ -15,6 +17,26 @@ async function authenticateToken(req, res, next) {
         return res.status(400).json({ message: "Invalid token." });
     }
 
+    // Fast-path: Check Redis session if session ID is in token
+    if (decoded.sid) {
+        try {
+            const session = await getSession(decoded.sid);
+            if (session) {
+                req.user = session;
+                req.sessionId = decoded.sid;
+                return next();
+            }
+
+            // If Redis is online and ready, but session key is missing, token was revoked on logout
+            if (redis.status === "ready") {
+                return res.status(401).json({ message: "Session expired or revoked." });
+            }
+        } catch (sessionErr) {
+            console.warn("Session check fallback to database:", sessionErr.message);
+        }
+    }
+
+    // Fallback: Query PostgreSQL directly
     try {
         const user = await pool.query("SELECT * FROM users WHERE id = $1", [decoded.id]);
 
@@ -23,6 +45,7 @@ async function authenticateToken(req, res, next) {
         }
 
         req.user = user.rows[0];
+        req.sessionId = decoded.sid || null;
         return next();
     } catch (error) {
         return next(error);

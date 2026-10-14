@@ -4,6 +4,9 @@ const { STREAM_NAME, CONSUMER_GROUP, ensureConsumerGroup } = require("../service
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { probeContainerEndpoint } = require("../services/healthCheck.js");
 const { registerUpstreamRoute } = require("../services/proxyRouter.js");
+const { setDeploymentHotState, deleteDeploymentHotState } = require("../services/hotState.js");
+const { publishDeploymentEvent } = require("../services/deploymentEvents.js");
+const { drainPersistenceEvents } = require("./persistenceWorker.js");
 
 const CONSUMER_NAME = `worker-${process.pid}`;
 let isRunning = false;
@@ -56,6 +59,8 @@ async function processJob(jobData, messageId) {
     commit_hash,
     runtime,
     port,
+    domain: jobDomain,
+    project_name: jobProjectName,
   } = jobData;
 
   const depRes = await pool.query(
@@ -64,6 +69,9 @@ async function processJob(jobData, messageId) {
   );
   if (depRes.rows.length === 0) return;
   const dep = depRes.rows[0];
+
+  const domain = dep.domain || jobDomain || "";
+  const projectName = dep.project_name || jobProjectName || "unknown";
 
   // Idempotency check: if already RUNNING or CANCELLED, acknowledge and skip
   const currentStatus = (dep.status || "").toUpperCase();
@@ -75,6 +83,25 @@ async function processJob(jobData, messageId) {
   }
 
   // 1. Transition to CLONING
+  // Step 9a: Update Redis Hot State
+  await setDeploymentHotState(deployment_id, {
+    project_id,
+    status: "CLONING",
+    stage: "clone",
+    progress_pct: 20,
+    domain,
+    port: port || 3000,
+  });
+
+  // Step 9b: Emit deployment event to stream:deployment_events
+  await publishDeploymentEvent("STAGE_CHANGED", {
+    deployment_id,
+    project_id,
+    user_id,
+    status: "CLONING",
+    stage: "clone",
+  });
+
   await pool.query(
     `UPDATE deployments SET status = 'CLONING', updated_at = NOW() WHERE id = $1`,
     [deployment_id]
@@ -97,12 +124,32 @@ async function processJob(jobData, messageId) {
     user_id,
     "STEP",
     "clone",
-    `Cloning ${repo_url || dep.project_name} (branch: ${branch || "main"}, commit: ${(commit_hash || "HEAD").slice(0, 7)})`
+    `Cloning ${repo_url || projectName} (branch: ${branch || "main"}, commit: ${(commit_hash || "HEAD").slice(0, 7)})`
   );
 
+  await drainPersistenceEvents();
   await sleep(300);
 
   // 2. Transition to BUILDING
+  // Step 9a: Update Redis Hot State
+  await setDeploymentHotState(deployment_id, {
+    project_id,
+    status: "BUILDING",
+    stage: "build",
+    progress_pct: 50,
+    domain,
+    port: port || 3000,
+  });
+
+  // Step 9b: Emit deployment event to stream:deployment_events
+  await publishDeploymentEvent("STAGE_CHANGED", {
+    deployment_id,
+    project_id,
+    user_id,
+    status: "BUILDING",
+    stage: "build",
+  });
+
   await pool.query(
     `UPDATE deployments SET status = 'BUILDING', updated_at = NOW() WHERE id = $1`,
     [deployment_id]
@@ -120,9 +167,29 @@ async function processJob(jobData, messageId) {
     `Building Docker image for runtime: ${runtime || "node"} · Layers verified`
   );
 
+  await drainPersistenceEvents();
   await sleep(300);
 
   // 3. Transition to STARTING
+  // Step 9a: Update Redis Hot State
+  await setDeploymentHotState(deployment_id, {
+    project_id,
+    status: "STARTING",
+    stage: "deploy",
+    progress_pct: 80,
+    domain,
+    port: port || 3000,
+  });
+
+  // Step 9b: Emit deployment event to stream:deployment_events
+  await publishDeploymentEvent("STAGE_CHANGED", {
+    deployment_id,
+    project_id,
+    user_id,
+    status: "STARTING",
+    stage: "deploy",
+  });
+
   await pool.query(
     `UPDATE deployments SET status = 'STARTING', updated_at = NOW() WHERE id = $1`,
     [deployment_id]
@@ -150,11 +217,35 @@ async function processJob(jobData, messageId) {
     `Health probe on port :${port || 3000} returned ${probe.statusCode} OK (${probe.latencyMs}ms)`
   );
 
+  await drainPersistenceEvents();
   await sleep(300);
 
   // 4. Transition to RUNNING
   const containerId = `c_${deployment_id.replace(/-/g, "").slice(0, 12)}`;
   const durationSec = Math.max(1, Math.floor((Date.now() - new Date(dep.created_at).getTime()) / 1000));
+
+  // Step 9a: Update Redis Hot State
+  await setDeploymentHotState(deployment_id, {
+    project_id,
+    status: "RUNNING",
+    stage: "running",
+    progress_pct: 100,
+    container_id: containerId,
+    duration_seconds: durationSec,
+    domain,
+    public_url: `https://${domain}`,
+  });
+
+  // Step 9b: Emit deployment completed event
+  await publishDeploymentEvent("DEPLOYMENT_COMPLETED", {
+    deployment_id,
+    project_id,
+    user_id,
+    status: "RUNNING",
+    container_id: containerId,
+    duration_seconds: durationSec,
+    domain,
+  });
 
   await pool.query(
     `UPDATE deployments
@@ -171,9 +262,9 @@ async function processJob(jobData, messageId) {
   );
 
   // Register in dynamic reverse proxy routing table
-  registerUpstreamRoute(dep.domain, {
+  registerUpstreamRoute(domain, {
     projectId: project_id,
-    projectName: dep.project_name,
+    projectName,
     deploymentId: deployment_id,
     containerId,
     targetHost: "127.0.0.1",
@@ -188,10 +279,12 @@ async function processJob(jobData, messageId) {
     user_id,
     "INFO",
     "deploy",
-    `Deployment #${dep.deployment_number} is healthy · public URL active: https://${dep.domain}`
+    `Deployment #${dep.deployment_number} is healthy · public URL active: https://${domain}`
   );
 
-  // 4. Acknowledge message in Redis Stream
+  await drainPersistenceEvents();
+
+  // 5. Acknowledge message in Redis Stream
   try {
     await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
   } catch (ackErr) {

@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
+const { updateSessionUser } = require("../services/sessionService.js");
 
 const router = express.Router();
 
@@ -106,9 +107,14 @@ router.put("/profile", async (req, res) => {
       ]
     );
 
+    const updatedRow = result.rows[0];
+    if (req.sessionId) {
+      await updateSessionUser(req.sessionId, updatedRow);
+    }
+
     return res.status(200).json({
       message: "Profile updated successfully.",
-      user: formatProfile(result.rows[0]),
+      user: formatProfile(updatedRow),
     });
   } catch (error) {
     if (error.code === "23505") {
@@ -187,6 +193,10 @@ router.put("/notifications", async (req, res) => {
        RETURNING notification_preferences`,
       [JSON.stringify(updatedPrefs), req.user.id]
     );
+
+    if (req.sessionId) {
+      await updateSessionUser(req.sessionId, { notification_preferences: result.rows[0].notification_preferences });
+    }
 
     return res.status(200).json({
       message: "Alert preferences updated.",

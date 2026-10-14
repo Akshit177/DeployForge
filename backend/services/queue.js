@@ -41,6 +41,8 @@ async function publishDeploymentJob(payload) {
       "runtime", payload.runtime || "node",
       "port", String(payload.port || 3000),
       "trigger", payload.trigger || "manual",
+      "domain", payload.domain || payload.project_domain || "",
+      "project_name", payload.project_name || payload.projectName || "",
       "created_at", new Date().toISOString(),
     ];
 

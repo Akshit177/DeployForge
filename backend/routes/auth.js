@@ -1,7 +1,8 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const pool = require("../config/db.js");
-const { generateAccessToken } = require("../services/auth.js");
+const { generateAccessToken, verifyAccessToken } = require("../services/auth.js");
+const { createSession, destroySession } = require("../services/sessionService.js");
 
 const { authenticateToken } = require("../middleware/auth.js");
 
@@ -52,15 +53,17 @@ router.post("/register", async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
         const result = await pool.query(
-            "INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name AS user_name, email",
+            "INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name AS user_name, email, github_connected, notification_preferences",
             [user_name.trim(), normalizedEmail, hashedPassword]
         );
         const user = result.rows[0];
+        const sessionId = await createSession(user);
 
-        res.cookie("token", generateAccessToken(user.id), cookieOptions);
+        res.cookie("token", generateAccessToken(user.id, sessionId), cookieOptions);
         return res.status(201).json({
             message: `Account created successfully for ${user.user_name}.`,
             user: publicUser(user),
+            session_id: sessionId,
         });
     } catch (error) {
         if (error.code === "23505") {
@@ -79,7 +82,7 @@ router.post("/login", async (req, res) => {
 
     try {
         const result = await pool.query(
-            "SELECT id, name AS user_name, email, password_hash FROM users WHERE email = $1",
+            "SELECT id, name AS user_name, email, password_hash, github_connected, notification_preferences FROM users WHERE email = $1",
             [email.trim().toLowerCase()]
         );
         const user = result.rows[0];
@@ -87,10 +90,12 @@ router.post("/login", async (req, res) => {
             return res.status(401).json({ message: "Invalid email or password." });
         }
 
-        res.cookie("token", generateAccessToken(user.id), cookieOptions);
+        const sessionId = await createSession(user);
+        res.cookie("token", generateAccessToken(user.id, sessionId), cookieOptions);
         return res.status(200).json({
             message: `Welcome back, ${user.user_name}.`,
             user: publicUser(user),
+            session_id: sessionId,
         });
     } catch (error) {
         console.error("Login failed:", error);
@@ -98,14 +103,28 @@ router.post("/login", async (req, res) => {
     }
 });
 
-router.post("/logout", (req, res) => {
+router.post("/logout", async (req, res) => {
+    try {
+        const token = req.cookies?.token;
+        if (token) {
+            try {
+                const decoded = verifyAccessToken(token);
+                if (decoded?.sid) {
+                    await destroySession(decoded.sid);
+                }
+            } catch (_) {}
+        }
+    } catch (err) {
+        console.warn("Logout session destruction warning:", err.message);
+    }
     res.clearCookie("token", cookieOptions);
-    res.status(200).json({ message: "Signed out successfully." });
+    return res.status(200).json({ message: "Signed out successfully." });
 });
 
 router.get("/me", authenticateToken, (req, res) => {
     return res.status(200).json({
         user: publicUser(req.user),
+        session_id: req.sessionId || null,
     });
 });
 

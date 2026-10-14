@@ -193,6 +193,8 @@ router.post("/", async (req, res) => {
       runtime: newProject.runtime,
       port: newProject.port,
       trigger: "initial",
+      domain: newProject.domain,
+      project_name: newProject.name,
       deployment_number: initDep.deployment_number,
     };
 

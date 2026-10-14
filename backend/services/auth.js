@@ -11,13 +11,18 @@ function getJWTSecret() {
     return secret;
 }
 
-function generateAccessToken(userId) {
+function generateAccessToken(userId, sessionId = null) {
     if (!userId) {
         throw new Error("A user ID is required to generate an access token.");
     }
 
+    const payload = { id: String(userId) };
+    if (sessionId) {
+        payload.sid = String(sessionId);
+    }
+
     return jwt.sign(
-        { id: String(userId) },
+        payload,
         getJWTSecret(),
         {
             algorithm: "HS256",

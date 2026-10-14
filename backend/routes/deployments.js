@@ -4,6 +4,7 @@ const { authenticateToken } = require("../middleware/auth.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
+const { getDeploymentHotState, setDeploymentHotState } = require("../services/hotState.js");
 
 const router = express.Router();
 
@@ -224,6 +225,8 @@ router.post("/", async (req, res) => {
       runtime: project.runtime,
       port: project.port,
       trigger: deployTrigger,
+      domain: project.domain,
+      project_name: project.name,
       deployment_number: newDeploy.deployment_number,
     };
 
@@ -267,6 +270,46 @@ router.post("/", async (req, res) => {
   }
 });
 
+// GET /api/deployments/:id/live - Retrieve live hot deployment state from Redis
+router.get("/:id/live", async (req, res) => {
+  const { id } = req.params;
+  const isUuid = UUID_REGEX.test(id);
+
+  if (!isUuid) {
+    return res.status(400).json({ message: "Live hot state requires deployment UUID." });
+  }
+
+  try {
+    const hotState = await getDeploymentHotState(id);
+    if (hotState) {
+      return res.status(200).json({
+        live: true,
+        hot_state: hotState,
+      });
+    }
+
+    // Fallback to PostgreSQL durable record if hot state has expired
+    const result = await pool.query(
+      `SELECT d.*, p.name AS project_name, p.domain AS project_domain
+       FROM deployments d JOIN projects p ON d.project_id = p.id
+       WHERE d.id = $1 AND d.user_id = $2`,
+      [id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Deployment not found." });
+    }
+
+    return res.status(200).json({
+      live: false,
+      deployment: formatDeployment(result.rows[0]),
+    });
+  } catch (error) {
+    console.error("Failed to fetch live deployment state:", error);
+    return res.status(500).json({ message: "Unable to retrieve live deployment state." });
+  }
+});
+
 // GET /api/deployments/:id - Get deployment details
 router.get("/:id", async (req, res) => {
   const { id } = req.params;
@@ -296,8 +339,19 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ message: "Deployment not found." });
     }
 
+    const row = result.rows[0];
+    const formatted = formatDeployment(row);
+
+    // Enrich with Redis hot state if available
+    try {
+      const hotState = await getDeploymentHotState(row.id);
+      if (hotState) {
+        formatted.hot_state = hotState;
+      }
+    } catch (_) {}
+
     return res.status(200).json({
-      deployment: formatDeployment(result.rows[0]),
+      deployment: formatted,
     });
   } catch (error) {
     console.error("Failed to fetch deployment:", error);

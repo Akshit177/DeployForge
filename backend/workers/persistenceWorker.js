@@ -1,0 +1,301 @@
+const pool = require("../config/db.js");
+const redis = require("../config/redis.js");
+const {
+  EVENTS_STREAM,
+  PERSISTENCE_GROUP,
+  ensurePersistenceGroup,
+} = require("../services/deploymentEvents.js");
+
+const CONSUMER_NAME = `persistence-${process.pid}`;
+let isLoopRunning = false;
+let loopTimer = null;
+let activeDrainPromise = null;
+
+function parseStreamEntry(fieldsArray) {
+  const result = {};
+  for (let i = 0; i < fieldsArray.length; i += 2) {
+    result[fieldsArray[i]] = fieldsArray[i + 1];
+  }
+  return result;
+}
+
+/**
+ * Apply event state change inside an atomic PostgreSQL transaction
+ * @param {object} client - pg pool client with open transaction
+ * @param {string} eventType
+ * @param {object} payload
+ */
+async function applyEventTransaction(client, eventType, payload) {
+  const {
+    deployment_id,
+    project_id,
+    user_id,
+    status,
+    container_id,
+    duration_seconds,
+    error_message,
+    log,
+  } = payload;
+
+  switch (eventType) {
+    case "STAGE_CHANGED": {
+      if (deployment_id && status) {
+        await client.query(
+          `UPDATE deployments SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [status, deployment_id]
+        );
+      }
+      if (project_id && status) {
+        await client.query(
+          `UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [status, project_id]
+        );
+      }
+      break;
+    }
+
+    case "DEPLOYMENT_COMPLETED": {
+      if (deployment_id) {
+        await client.query(
+          `UPDATE deployments
+           SET status = 'RUNNING',
+               duration_seconds = COALESCE($1, duration_seconds),
+               container_id = COALESCE($2, container_id),
+               updated_at = NOW()
+           WHERE id = $3`,
+          [duration_seconds || 0, container_id || null, deployment_id]
+        );
+      }
+      if (project_id) {
+        await client.query(
+          `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
+          [project_id]
+        );
+      }
+      break;
+    }
+
+    case "DEPLOYMENT_FAILED": {
+      if (deployment_id) {
+        await client.query(
+          `UPDATE deployments
+           SET status = 'FAILED',
+               error_message = $1,
+               updated_at = NOW()
+           WHERE id = $2`,
+          [error_message || "Deployment failed", deployment_id]
+        );
+      }
+      if (project_id) {
+        await client.query(
+          `UPDATE projects SET status = 'Failed', updated_at = NOW() WHERE id = $1`,
+          [project_id]
+        );
+      }
+      break;
+    }
+
+    case "DEPLOYMENT_CANCELLED": {
+      if (deployment_id) {
+        await client.query(
+          `UPDATE deployments
+           SET status = 'Cancelled',
+               error_message = 'Deployment cancelled by user.',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [deployment_id]
+        );
+      }
+      if (project_id) {
+        await client.query(
+          `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
+          [project_id]
+        );
+      }
+      break;
+    }
+
+    case "LOG_EMITTED":
+    default:
+      break;
+  }
+
+  // Insert log row if attached to event
+  if (log && deployment_id && project_id && user_id) {
+    await client.query(
+      `INSERT INTO logs (deployment_id, project_id, user_id, level, source, message)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        deployment_id,
+        project_id,
+        user_id,
+        log.level || "INFO",
+        log.source || "worker",
+        log.message || log.text || "",
+      ]
+    );
+  }
+}
+
+/**
+ * Process a single event message with guaranteed atomic persistence:
+ * Read Redis event → PostgreSQL update in transaction → COMMIT → ACK Redis event
+ */
+async function processEvent(messageId, eventType, rawPayload) {
+  let payload;
+  try {
+    payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+  } catch (parseErr) {
+    console.error(`Invalid JSON payload for event ${messageId}:`, parseErr.message);
+    // Bad message format - acknowledge to avoid blocking queue
+    await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId).catch(() => {});
+    return false;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await applyEventTransaction(client, eventType, payload);
+    await client.query("COMMIT");
+
+    // ACK Redis event ONLY AFTER durable PostgreSQL transaction commits
+    await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId);
+    return true;
+  } catch (dbErr) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.warn(`[Persistence Worker] Commit failed for event ${messageId}, leaving un-ACKed in Redis PEL:`, dbErr.message);
+    // Message remains unacknowledged in Redis PEL for retry
+    return false;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Poll deployment event stream once
+ * Reads new events ('>') and any pending unacknowledged events from PEL
+ * @param {number} [count]
+ * @returns {Promise<number>} Processed event count
+ */
+async function pollPersistenceEvents(count = 10) {
+  await ensurePersistenceGroup();
+
+  try {
+    if (redis.status !== "ready" && redis.status !== "connecting") {
+      await redis.connect().catch(() => {});
+    }
+
+    let processedTotal = 0;
+
+    // 1. Process new messages
+    const response = await redis.xreadgroup(
+      "GROUP",
+      PERSISTENCE_GROUP,
+      CONSUMER_NAME,
+      "COUNT",
+      String(count),
+      "STREAMS",
+      EVENTS_STREAM,
+      ">"
+    );
+
+    if (response && response.length > 0) {
+      const [, messages] = response[0];
+      if (messages && messages.length > 0) {
+        for (const [messageId, fieldsArray] of messages) {
+          const entry = parseStreamEntry(fieldsArray);
+          const success = await processEvent(messageId, entry.event_type, entry.payload);
+          if (success) processedTotal++;
+        }
+      }
+    }
+
+    return processedTotal;
+  } catch (error) {
+    if (!error.message.includes("NOGROUP")) {
+      console.warn("Persistence worker polling error:", error.message);
+    }
+    return 0;
+  }
+}
+
+/**
+ * Drain all pending persistence events until the stream is caught up
+ */
+async function drainPersistenceEvents() {
+  if (activeDrainPromise) {
+    return activeDrainPromise;
+  }
+
+  activeDrainPromise = (async () => {
+    let total = 0;
+    let batchCount = 0;
+    while (batchCount < 20) {
+      const processed = await pollPersistenceEvents(10);
+      total += processed;
+      if (processed === 0) break;
+      batchCount++;
+    }
+    return total;
+  })().finally(() => {
+    activeDrainPromise = null;
+  });
+
+  return activeDrainPromise;
+}
+
+/**
+ * Start background persistence worker loop
+ */
+function startPersistenceWorkerLoop(intervalMs = 300) {
+  if (isLoopRunning) return;
+  isLoopRunning = true;
+
+  async function loop() {
+    if (!isLoopRunning) return;
+    try {
+      await pollPersistenceEvents(10);
+    } catch (_) {}
+    if (isLoopRunning) {
+      loopTimer = setTimeout(loop, intervalMs);
+    }
+  }
+
+  loop();
+  console.log(`[Persistence Worker] Background event loop started (${intervalMs}ms interval)`);
+}
+
+/**
+ * Stop background persistence worker loop
+ */
+function stopPersistenceWorkerLoop() {
+  isLoopRunning = false;
+  if (loopTimer) {
+    clearTimeout(loopTimer);
+    loopTimer = null;
+  }
+}
+
+// Standalone CLI execution
+if (require.main === module) {
+  console.log("Starting DeployForge Dedicated Persistence Worker...");
+  startPersistenceWorkerLoop(200);
+
+  const shutdown = () => {
+    console.log("Stopping Persistence Worker...");
+    stopPersistenceWorkerLoop();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+module.exports = {
+  CONSUMER_NAME,
+  processEvent,
+  pollPersistenceEvents,
+  drainPersistenceEvents,
+  startPersistenceWorkerLoop,
+  stopPersistenceWorkerLoop,
+};

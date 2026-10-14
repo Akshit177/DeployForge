@@ -120,16 +120,24 @@ async function runTestSuite() {
 
     // 4. Test Lifecycle Progression: QUEUED -> CLONING -> BUILDING -> STARTING -> RUNNING
     console.log("  Executing worker loop to verify granular lifecycle progression...");
-    const processedJobs = await pollOnce();
-    assert(processedJobs >= 1, "Worker consumed job from Redis Stream");
+    let attempts = 0;
+    let finalDep = null;
+    while (attempts < 15) {
+      await pollOnce();
+      const runningCheck = await pool.query(
+        `SELECT * FROM deployments WHERE id = $1`,
+        [initialDep.id]
+      );
+      if (runningCheck.rows[0]?.status && runningCheck.rows[0].status.toUpperCase() === "RUNNING") {
+        finalDep = runningCheck.rows[0];
+        break;
+      }
+      attempts++;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
-    // Verify deployment status is now RUNNING
-    const runningCheck = await pool.query(
-      `SELECT * FROM deployments WHERE id = $1`,
-      [initialDep.id]
-    );
-    const finalDep = runningCheck.rows[0];
-    assert(finalDep.status === "RUNNING", "Deployment reached final RUNNING lifecycle status");
+    assert(Boolean(finalDep), "Worker consumed job from Redis Stream");
+    assert(finalDep.status.toUpperCase() === "RUNNING", "Deployment reached final RUNNING lifecycle status");
     assert(typeof finalDep.container_id === "string", "Worker assigned container_id");
 
     // Verify lifecycle logs generated
