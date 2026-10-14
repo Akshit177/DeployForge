@@ -97,7 +97,11 @@ router.get("/", verifyProjectOwnership, async (req, res) => {
 // POST /api/projects/:id/env - Upsert one or more environment variables
 router.post("/", verifyProjectOwnership, async (req, res) => {
   const payload = req.body;
-  const items = Array.isArray(payload) ? payload : [payload];
+  const items = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload.variables)
+    ? payload.variables
+    : [payload];
 
   if (items.length === 0) {
     return res.status(400).json({ message: "No environment variables provided." });
