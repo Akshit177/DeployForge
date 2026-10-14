@@ -64,6 +64,7 @@ services:
       APP_NETWORK: deployforge-apps
       WORKSPACE_BASE_PATH: /var/lib/deployforge/workspaces
       NGINX_UPSTREAMS_PATH: /app/nginx/conf.d/deployforge-upstreams.conf
+      ENABLE_NODE_DEPLOYMENT_WORKER: ${ENABLE_NODE_DEPLOYMENT_WORKER:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - workspaces_data:/var/lib/deployforge/workspaces
@@ -74,6 +75,35 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ==============================================================================
+  # DeployForge C++ High-Performance Deployment Worker (Execution Plane)
+  # ==============================================================================
+  cpp-worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: deployforge-cpp-worker
+    restart: unless-stopped
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_STREAM: stream:deployments
+      REDIS_GROUP: deployforge_workers
+      REDIS_EVENTS_STREAM: stream:deployment_events
+      DOCKER_MODE: ${DOCKER_MODE:-real}
+      DOCKER_SOCK: /var/run/docker.sock
+      WORKSPACE_BASE_PATH: /var/lib/deployforge/workspaces
+      APP_NETWORK: deployforge-apps
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - workspaces_data:/var/lib/deployforge/workspaces
+    networks:
+      - deployforge-control
+      - deployforge-apps
+    depends_on:
       redis:
         condition: service_healthy
 

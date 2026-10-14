@@ -58,7 +58,12 @@ app.listen(PORT, () => {
   if (process.env.ENABLE_PERSISTENCE !== "false") {
     startPersistenceWorkerLoop();
   }
-  if (process.env.ENABLE_WORKER !== "false") {
+  const enableNodeDeploymentWorker =
+    process.env.ENABLE_NODE_DEPLOYMENT_WORKER !== "false" &&
+    process.env.ENABLE_WORKER !== "false";
+  if (enableNodeDeploymentWorker) {
     startWorkerLoop().catch((err) => console.warn("Worker loop warning:", err.message));
+  } else {
+    console.log("[Worker] Node.js deployment worker disabled (C++ deployment worker active)");
   }
 });

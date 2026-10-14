@@ -195,6 +195,18 @@ async function runTestSuite() {
 
     await ensurePersistenceGroup();
 
+    // Clean any prior pending entries so PEL starts in a clean state
+    try {
+      const priorPending = await redis.xpending(EVENTS_STREAM, PERSISTENCE_GROUP, "-", "+", 100);
+      if (Array.isArray(priorPending)) {
+        for (const item of priorPending) {
+          if (item && item[0]) {
+            await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, item[0]).catch(() => {});
+          }
+        }
+      }
+    } catch (_) {}
+
     // 1. Manually publish a STAGE_CHANGED event
     const eventId1 = await publishDeploymentEvent("STAGE_CHANGED", {
       deployment_id: initialDeployId,
@@ -222,8 +234,9 @@ async function runTestSuite() {
     assert(depCheck1.rows[0].status === "CLONING", "PostgreSQL deployment status updated to 'CLONING' via persistence transaction");
 
     // 4. Verify Redis XACK: Pending Entries List (PEL) count must be 0 for this message
-    const pel = await redis.xpending(EVENTS_STREAM, PERSISTENCE_GROUP);
-    assert(pel[0] === 0, "Redis event message was acknowledged (XACK) after database COMMIT (PEL is 0)");
+    const pel = await redis.xpending(EVENTS_STREAM, PERSISTENCE_GROUP, "-", "+", 100);
+    const isPending = Array.isArray(pel) && pel.some((item) => item[0] === eventId1);
+    assert(!isPending, "Redis event message was acknowledged (XACK) after database COMMIT (not in PEL)");
 
     // 5. Test DEPLOYMENT_COMPLETED event
     const eventId2 = await publishDeploymentEvent("DEPLOYMENT_COMPLETED", {

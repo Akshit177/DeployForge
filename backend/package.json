@@ -13,6 +13,8 @@
     "test:outbox": "node tests/outbox_pattern.test.js",
     "test:persistence": "node tests/persistence_and_sessions.test.js",
     "test:phase_c": "node --test tests/docker_client.test.js && node --test tests/runtime_detector.test.js && node --test tests/phase_c_integration.test.js",
+    "test:worker": "make -C ../worker test",
+    "build:worker": "make -C ../worker all",
     "test:e2e": "node tests/e2e_platform.test.js"
   },
   "dependencies": {
