@@ -1,6 +1,7 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import { fetchProjects, deleteProject } from "../services/projectService.js";
+import { triggerDeployment } from "../services/deploymentService.js";
 import {
   PlusIcon,
   SearchIcon,
@@ -19,6 +20,8 @@ import {
   CopyIcon,
   TrashIcon,
   SpinnerIcon,
+  PlayIcon,
+  ArrowRightIcon,
 } from "../components/common/TechIcons.jsx";
 
 function timeAgo(dateString) {
@@ -32,6 +35,30 @@ function timeAgo(dateString) {
   return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
+function getStageProgress(rawStatus) {
+  const s = (rawStatus || "").toLowerCase().trim();
+  switch (s) {
+    case "initiated":
+      return { percent: 15, label: "Initiating pipeline...", color: "amber", active: true };
+    case "queued":
+      return { percent: 30, label: "Queued in Redis stream", color: "amber", active: true };
+    case "cloning":
+      return { percent: 50, label: "Cloning Git repository...", color: "amber", active: true };
+    case "building":
+      return { percent: 75, label: "Compiling container image...", color: "amber", active: true };
+    case "starting":
+      return { percent: 90, label: "Spawning & health checking...", color: "emerald", active: true };
+    case "running":
+    case "succeeded":
+    case "live":
+      return { percent: 100, label: "Healthy & active", color: "emerald", active: false };
+    case "failed":
+      return { percent: 100, label: "Deployment failed", color: "red", active: false };
+    default:
+      return { percent: 0, label: "Stopped", color: "muted", active: false };
+  }
+}
+
 export default function ProjectsPage({ navigate }) {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -40,24 +67,59 @@ export default function ProjectsPage({ navigate }) {
   const [activeFilter, setActiveFilter] = useState("All");
   const [copiedCommit, setCopiedCommit] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [redeployingId, setRedeployingId] = useState(null);
+  const [redeployNotice, setRedeployNotice] = useState(null);
 
-  const loadProjects = async () => {
+  const pollTimerRef = useRef(null);
+
+  const loadProjects = async (isBackground = false) => {
     try {
-      setLoading(true);
+      if (!isBackground) setLoading(true);
       setError(null);
       const data = await fetchProjects();
       setProjects(data);
     } catch (err) {
       console.warn("Could not load backend projects:", err.message);
-      setError(err.message);
+      if (!isBackground) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadProjects();
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, []);
+
+  // Poll when any project is in an active build/start stage
+  useEffect(() => {
+    const hasActiveProjects = projects.some((p) => {
+      const s = (p.state || p.status || "").toLowerCase().trim();
+      return ["initiated", "queued", "cloning", "building", "starting"].includes(s);
+    });
+
+    if (hasActiveProjects) {
+      if (!pollTimerRef.current) {
+        pollTimerRef.current = setInterval(() => {
+          loadProjects(true);
+        }, 3500);
+      }
+    } else {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [projects]);
 
   const handleDelete = async (e, id, name) => {
     e.stopPropagation();
@@ -75,13 +137,48 @@ export default function ProjectsPage({ navigate }) {
     }
   };
 
+  const handleRedeploy = async (e, p) => {
+    e.stopPropagation();
+    if (redeployingId === p.id) return;
+    try {
+      setRedeployingId(p.id);
+      await triggerDeployment({
+        project_id: p.id,
+        branch: p.branch || "main",
+        commit_message: "Manual redeploy trigger",
+        environment: "production",
+      });
+
+      // Optimistically update status to QUEUED in local state
+      setProjects((prev) =>
+        prev.map((proj) => (proj.id === p.id ? { ...proj, status: "QUEUED", state: "QUEUED" } : proj))
+      );
+
+      setRedeployNotice(`Redeployment triggered for "${p.name}". Pipeline dispatched to worker.`);
+      setTimeout(() => setRedeployNotice(null), 4000);
+    } catch (err) {
+      alert(`Could not trigger deployment: ${err.message}`);
+    } finally {
+      setRedeployingId(null);
+    }
+  };
+
   const filterCounts = useMemo(() => {
     return {
       All: projects.length,
-      Running: projects.filter((p) => (p.state || p.status) === "Running").length,
-      Building: projects.filter((p) => (p.state || p.status) === "Building").length,
-      Failed: projects.filter((p) => (p.state || p.status) === "Failed").length,
-      Queued: projects.filter((p) => (p.state || p.status) === "Queued").length,
+      Running: projects.filter((p) => {
+        const s = (p.state || p.status || "").toLowerCase();
+        return s === "running" || s === "succeeded" || s === "live";
+      }).length,
+      Building: projects.filter((p) => {
+        const s = (p.state || p.status || "").toLowerCase();
+        return s === "building" || s === "cloning" || s === "starting";
+      }).length,
+      Failed: projects.filter((p) => (p.state || p.status || "").toLowerCase() === "failed").length,
+      Queued: projects.filter((p) => {
+        const s = (p.state || p.status || "").toLowerCase();
+        return s === "queued" || s === "initiated";
+      }).length,
     };
   }, [projects]);
 
@@ -91,7 +188,7 @@ export default function ProjectsPage({ navigate }) {
       const pRepo = p.repo || p.repository_url || "";
       const pCommit = p.commit || p.latest_commit || "";
       const pRuntime = p.runtime || "";
-      const pStatus = p.state || p.status || "Queued";
+      const pStatus = (p.state || p.status || "Queued").toLowerCase();
 
       const matchesSearch =
         pName.toLowerCase().includes(query.toLowerCase()) ||
@@ -99,10 +196,13 @@ export default function ProjectsPage({ navigate }) {
         pCommit.toLowerCase().includes(query.toLowerCase()) ||
         pRuntime.toLowerCase().includes(query.toLowerCase());
 
-      const matchesStatus =
-        activeFilter === "All" || pStatus.toLowerCase() === activeFilter.toLowerCase();
-
-      return matchesSearch && matchesStatus;
+      if (!matchesSearch) return false;
+      if (activeFilter === "All") return true;
+      if (activeFilter === "Running") return pStatus === "running" || pStatus === "succeeded" || pStatus === "live";
+      if (activeFilter === "Building") return pStatus === "building" || pStatus === "cloning" || pStatus === "starting";
+      if (activeFilter === "Failed") return pStatus === "failed";
+      if (activeFilter === "Queued") return pStatus === "queued" || pStatus === "initiated";
+      return true;
     });
   }, [projects, query, activeFilter]);
 
@@ -148,6 +248,14 @@ export default function ProjectsPage({ navigate }) {
           <span>New Project</span>
         </button>
       </div>
+
+      {/* Redeploy Notification Toast */}
+      {redeployNotice && (
+        <div className="auth-message-block success" style={{ marginBottom: "1.25rem" }}>
+          <CheckIcon size={14} />
+          <span>{redeployNotice}</span>
+        </div>
+      )}
 
       {/* Project Summary Metrics Strip */}
       <section className="figma-metrics-strip" aria-label="Project metrics summary">
@@ -225,7 +333,7 @@ export default function ProjectsPage({ navigate }) {
           <button
             type="button"
             className="btn-secondary btn-sm"
-            onClick={loadProjects}
+            onClick={() => loadProjects(false)}
             style={{ marginLeft: "1rem" }}
           >
             Retry
@@ -248,14 +356,22 @@ export default function ProjectsPage({ navigate }) {
             const state = p.state || p.status || "Queued";
             const ageDisplay = timeAgo(p.created_at);
             const isDeleting = deletingId === p.id;
+            const isRedeploying = redeployingId === p.id;
+            const stageProgress = getStageProgress(state);
+            const rawDomain = p.url || p.domain || `${p.name}.deployforge.app`;
+            const domainHref = rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`;
 
             return (
               <article
                 key={p.id || p.name}
                 className="figma-project-card"
                 tabIndex={0}
-                onClick={() => navigate("/deployments/detail")}
-                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && navigate("/deployments/detail")}
+                onClick={() => navigate(`/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    navigate(`/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`);
+                  }
+                }}
                 role="button"
                 aria-label={`View deployment details for ${p.name}`}
                 style={{ opacity: isDeleting ? 0.4 : 1 }}
@@ -264,6 +380,21 @@ export default function ProjectsPage({ navigate }) {
                   <h3 className="card-project-name">{p.name}</h3>
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                     <StatusBadge value={state} size="sm" />
+                    <button
+                      type="button"
+                      className="btn-card-redeploy"
+                      disabled={isRedeploying || stageProgress.active}
+                      onClick={(e) => handleRedeploy(e, p)}
+                      title={stageProgress.active ? "Pipeline currently in progress" : "Trigger new deployment"}
+                      aria-label={`Redeploy ${p.name}`}
+                    >
+                      {isRedeploying ? (
+                        <SpinnerIcon size={11} className="spin" />
+                      ) : (
+                        <PlayIcon size={10} />
+                      )}
+                      <span>{isRedeploying ? "Triggering..." : "Redeploy"}</span>
+                    </button>
                     <button
                       type="button"
                       className="env-del-btn"
@@ -303,15 +434,35 @@ export default function ProjectsPage({ navigate }) {
                   </span>
                 </div>
 
+                {/* Stage Progress Bar for active or failed deployments */}
+                {stageProgress.active && (
+                  <div className="card-stage-progress" onClick={(e) => e.stopPropagation()}>
+                    <div className="stage-progress-track">
+                      <div
+                        className={`stage-progress-fill ${stageProgress.color}`}
+                        style={{ width: `${stageProgress.percent}%` }}
+                      />
+                    </div>
+                    <div className="stage-progress-meta">
+                      <span className="stage-progress-step">
+                        <SpinnerIcon size={11} className="spin text-amber" />
+                        <span>{stageProgress.label}</span>
+                      </span>
+                      <span className="stage-progress-percent">{stageProgress.percent}%</span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="card-url-row">
                   <a
                     className="card-domain-link"
-                    href={`https://${p.url || p.domain}`}
+                    href={domainHref}
                     target="_blank"
                     rel="noreferrer"
                     onClick={(e) => e.stopPropagation()}
+                    title="Open live production domain in new tab"
                   >
-                    <span>{p.url || p.domain}</span>
+                    <span>{rawDomain}</span>
                     <ExternalLinkIcon size={12} className="ext-arrow-svg" />
                   </a>
                 </div>
@@ -347,7 +498,7 @@ export default function ProjectsPage({ navigate }) {
             <p>
               {query || activeFilter !== "All"
                 ? "No applications matched your search or status filter."
-                : "You haven't imported any applications yet. Connect your first GitHub repository to get started."}
+                : "You haven't imported any applications yet. Connect a GitHub repository or select a template to launch your first service."}
             </p>
             {query || activeFilter !== "All" ? (
               <button
@@ -361,14 +512,82 @@ export default function ProjectsPage({ navigate }) {
                 Reset filters
               </button>
             ) : (
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => navigate("/projects/new")}
-              >
-                <PlusIcon size={14} />
-                <span>Create your first project</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => navigate("/projects/new")}
+                >
+                  <PlusIcon size={14} />
+                  <span>Create your first project</span>
+                </button>
+
+                {/* Quick-start Starter Templates */}
+                <div className="empty-starter-section">
+                  <h4 className="empty-starter-title">Or launch with a starter template</h4>
+                  <div className="empty-templates-grid">
+                    {/* Node.js Express */}
+                    <div className="starter-card">
+                      <div className="starter-card-header">
+                        <NodeIcon size={22} className="text-green" />
+                        <span className="starter-badge ready">Ready</span>
+                      </div>
+                      <h5 className="starter-title">Node.js Express</h5>
+                      <p className="starter-desc">
+                        Production-ready REST API with Express, internal port :3000, and automated health checks.
+                      </p>
+                      <button
+                        type="button"
+                        className="starter-btn"
+                        onClick={() => navigate("/projects/new?template=node")}
+                      >
+                        <span>Use Template</span>
+                        <ArrowRightIcon size={12} />
+                      </button>
+                    </div>
+
+                    {/* Static Site */}
+                    <div className="starter-card">
+                      <div className="starter-card-header">
+                        <HtmlIcon size={22} className="text-amber" />
+                        <span className="starter-badge ready">Ready</span>
+                      </div>
+                      <h5 className="starter-title">Static Web Application</h5>
+                      <p className="starter-desc">
+                        High-performance static site served by Nginx Alpine on internal port :80 with zero build config.
+                      </p>
+                      <button
+                        type="button"
+                        className="starter-btn"
+                        onClick={() => navigate("/projects/new?template=static")}
+                      >
+                        <span>Use Template</span>
+                        <ArrowRightIcon size={12} />
+                      </button>
+                    </div>
+
+                    {/* Python FastAPI - Coming Soon */}
+                    <div className="starter-card disabled">
+                      <div className="starter-card-header">
+                        <PythonIcon size={22} />
+                        <span className="starter-badge soon">Coming Soon</span>
+                      </div>
+                      <h5 className="starter-title">Python FastAPI</h5>
+                      <p className="starter-desc">
+                        Modern async Python service with Uvicorn. Container runtime scheduled for Phase D.
+                      </p>
+                      <button
+                        type="button"
+                        className="starter-btn"
+                        disabled
+                        title="Python runtime container support is arriving in Phase D"
+                      >
+                        <span>Coming Soon</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
             )}
           </div>
         )}
@@ -383,7 +602,7 @@ export default function ProjectsPage({ navigate }) {
               <div
                 key={p.id}
                 className="activity-row"
-                onClick={() => navigate("/deployments/detail")}
+                onClick={() => navigate(`/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`)}
                 style={{ cursor: "pointer" }}
               >
                 <span className="activity-icon text-green">

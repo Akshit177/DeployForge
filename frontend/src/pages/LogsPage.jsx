@@ -44,7 +44,7 @@ export default function LogsPage() {
       try {
         const historical = await fetchLogs({
           project_id: selectedProjectId || undefined,
-          limit: 120,
+          limit: 150,
         });
         setLogs(historical);
       } catch (err) {
@@ -72,7 +72,7 @@ export default function LogsPage() {
           onLog: (newEntry) => {
             setLogs((prev) => {
               if (prev.some((l) => l.id === newEntry.id)) return prev;
-              return [...prev.slice(-300), newEntry];
+              return [...prev.slice(-400), newEntry];
             });
           },
           onError: () => {
@@ -113,12 +113,12 @@ export default function LogsPage() {
   const handleDownload = () => {
     const activeProject = projects.find((p) => p.id === selectedProjectId);
     const projName = activeProject ? activeProject.name : "deployforge";
-    const content = filteredLogs.map((l) => `${l.time} [${l.level}] ${l.text || l.message}`).join("\n");
+    const content = filteredLogs.map((l) => `${l.time} [${(l.level || "INFO").toUpperCase()}] ${l.text || l.message}`).join("\n");
     const blob = new Blob([content], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${projName}-runtime.log`;
+    a.download = `${projName}-observability.log`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -134,7 +134,7 @@ export default function LogsPage() {
         <div>
           <h1 className="figma-page-title">Logs</h1>
           <p className="figma-page-subtitle">
-            Stream stdout and stderr from your running container instances in real time.
+            Real-time stdout and stderr streams from your container instances and deployment workers.
           </p>
         </div>
       </div>
@@ -161,7 +161,7 @@ export default function LogsPage() {
           <div className="stream-live-actions">
             <div className="live-status-pill">
               <span className={`status-indicator status-dot ${isLive ? "green-pulse" : "gray"}`} />
-              <span>{isLive ? "Live Stream" : "Paused"}</span>
+              <span>{isLive ? `Live SSE Stream (${logs.length} entries)` : "Stream Paused"}</span>
             </div>
 
             <button
@@ -286,7 +286,7 @@ export default function LogsPage() {
               return (
                 <div key={log.id} className={`term-log-row log-${level}`}>
                   <time className="log-timestamp">{log.time}</time>
-                  <span className={`log-level-badge lvl-${level}`}>[{log.level}]</span>
+                  <span className={`log-level-badge lvl-${level}`}>[{(log.level || "INFO").toUpperCase()}]</span>
                   <span className="log-text-content">{log.text || log.message}</span>
                 </div>
               );

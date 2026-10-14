@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
-import { fetchDeployments } from "../services/deploymentService.js";
+import { fetchDeployments, triggerDeployment, cancelDeployment } from "../services/deploymentService.js";
 import {
   SearchIcon,
   CloseIcon,
@@ -11,6 +11,8 @@ import {
   ArrowRightIcon,
   CopyIcon,
   SpinnerIcon,
+  PlayIcon,
+  PauseIcon,
 } from "../components/common/TechIcons.jsx";
 
 function timeAgo(dateString) {
@@ -32,24 +34,59 @@ export default function DeploymentsPage({ navigate }) {
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [copiedId, setCopiedId] = useState(null);
+  const [actioningId, setActioningId] = useState(null);
+  const [notice, setNotice] = useState(null);
 
-  const loadData = async () => {
+  const pollTimerRef = useRef(null);
+
+  const loadData = async (isBackground = false) => {
     try {
-      setLoading(true);
+      if (!isBackground) setLoading(true);
       setError(null);
       const data = await fetchDeployments();
       setDeployments(data);
     } catch (err) {
       console.warn("Could not load deployments:", err.message);
-      setError(err.message);
+      if (!isBackground) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadData();
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, []);
+
+  // Poll while any deployment is in active build/deploy pipeline
+  useEffect(() => {
+    const hasActive = deployments.some((d) => {
+      const s = (d.status || d.state || "").toLowerCase().trim();
+      return ["initiated", "queued", "cloning", "building", "starting", "deploying"].includes(s);
+    });
+
+    if (hasActive) {
+      if (!pollTimerRef.current) {
+        pollTimerRef.current = setInterval(() => {
+          loadData(true);
+        }, 3500);
+      }
+    } else {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [deployments]);
 
   const projectsList = useMemo(() => {
     const names = Array.from(new Set(deployments.map((d) => d.project || d.projectName).filter(Boolean)));
@@ -60,9 +97,15 @@ export default function DeploymentsPage({ navigate }) {
     return deployments.filter((d) => {
       const pName = d.project || d.projectName || "";
       const matchProject = selectedProject === "All projects" || pName === selectedProject;
-      const statusStr = d.state || d.status || "Queued";
-      const matchFilter =
-        filter === "All" || statusStr.toLowerCase() === filter.toLowerCase();
+      const statusStr = (d.state || d.status || "Queued").toLowerCase();
+
+      let matchFilter = filter === "All";
+      if (filter === "Succeeded") matchFilter = statusStr === "succeeded" || statusStr === "running" || statusStr === "live";
+      if (filter === "Building") matchFilter = statusStr === "building" || statusStr === "cloning" || statusStr === "starting" || statusStr === "deploying";
+      if (filter === "Queued") matchFilter = statusStr === "queued" || statusStr === "initiated";
+      if (filter === "Failed") matchFilter = statusStr === "failed";
+      if (filter === "Stopped") matchFilter = statusStr === "stopped" || statusStr === "cancelled";
+
       const matchQuery =
         (d.message || "").toLowerCase().includes(query.toLowerCase()) ||
         (d.commit || "").toLowerCase().includes(query.toLowerCase()) ||
@@ -80,6 +123,43 @@ export default function DeploymentsPage({ navigate }) {
     setTimeout(() => setCopiedId(null), 1800);
   };
 
+  const handleRedeploy = async (e, d) => {
+    e.stopPropagation();
+    if (actioningId === d.id) return;
+    try {
+      setActioningId(d.id);
+      await triggerDeployment({
+        project_id: d.project_id,
+        branch: d.branch || "main",
+        commit_message: `Redeploy: ${d.message || "Manual trigger"}`,
+        environment: d.environment || "production",
+      });
+      setNotice(`Redeployment dispatched for ${d.project || d.projectName}.`);
+      setTimeout(() => setNotice(null), 3500);
+      loadData(true);
+    } catch (err) {
+      alert(`Could not redeploy: ${err.message}`);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const handleCancel = async (e, d) => {
+    e.stopPropagation();
+    if (actioningId === d.id) return;
+    try {
+      setActioningId(d.id);
+      await cancelDeployment(d.id);
+      setNotice(`Deployment #${d.num || d.id.slice(0, 7)} has been cancelled.`);
+      setTimeout(() => setNotice(null), 3500);
+      loadData(true);
+    } catch (err) {
+      alert(`Could not cancel deployment: ${err.message}`);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   return (
     <div className="deployments-page reveal">
       {/* Page Header */}
@@ -91,6 +171,14 @@ export default function DeploymentsPage({ navigate }) {
           </p>
         </div>
       </div>
+
+      {/* Action Notice Toast */}
+      {notice && (
+        <div className="auth-message-block success" style={{ marginBottom: "1.25rem" }}>
+          <CheckIcon size={14} />
+          <span>{notice}</span>
+        </div>
+      )}
 
       {/* Control Toolbar */}
       <div className="deployments-toolbar">
@@ -112,7 +200,7 @@ export default function DeploymentsPage({ navigate }) {
 
         {/* Status Filter Chips */}
         <div className="filter-chips-list" role="tablist">
-          {["All", "Succeeded", "Failed", "Queued", "Stopped"].map((key) => {
+          {["All", "Succeeded", "Building", "Queued", "Failed", "Stopped"].map((key) => {
             const isSelected = filter === key;
             return (
               <button
@@ -159,7 +247,7 @@ export default function DeploymentsPage({ navigate }) {
           <button
             type="button"
             className="btn-secondary btn-sm"
-            onClick={loadData}
+            onClick={() => loadData(false)}
             style={{ marginLeft: "1rem" }}
           >
             Retry
@@ -189,6 +277,9 @@ export default function DeploymentsPage({ navigate }) {
             filteredDeployments.map((d) => {
               const displayId = d.display_id || `#${d.num || 1}`;
               const timeDisplay = timeAgo(d.created_at);
+              const rawStatus = (d.status || d.state || "Queued").toLowerCase();
+              const isActive = ["initiated", "queued", "cloning", "building", "starting", "deploying"].includes(rawStatus);
+              const isActioning = actioningId === d.id;
 
               return (
                 <div
@@ -259,7 +350,31 @@ export default function DeploymentsPage({ navigate }) {
                     )}
                   </div>
 
-                  <div className="cell-item cell-action">
+                  <div className="cell-item cell-action" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    {isActive ? (
+                      <button
+                        type="button"
+                        className="btn-card-redeploy"
+                        onClick={(e) => handleCancel(e, d)}
+                        disabled={isActioning}
+                        title="Cancel ongoing deployment"
+                      >
+                        {isActioning ? <SpinnerIcon size={11} className="spin" /> : <PauseIcon size={11} />}
+                        <span>Cancel</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-card-redeploy"
+                        onClick={(e) => handleRedeploy(e, d)}
+                        disabled={isActioning}
+                        title="Redeploy this release"
+                      >
+                        {isActioning ? <SpinnerIcon size={11} className="spin" /> : <PlayIcon size={11} />}
+                        <span>Redeploy</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       className="view-detail-btn"

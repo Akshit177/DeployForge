@@ -6,11 +6,15 @@ import LoginPage from "./pages/LoginPage.jsx";
 import RegisterPage from "./pages/RegisterPage.jsx";
 
 export default function App() {
-  const [path, setPath] = useState(() => window.location.pathname.replace(/\/+$/, "") || "/");
+  const [path, setPath] = useState(() => {
+    const p = window.location.pathname.replace(/\/+$/, "") || "/";
+    return window.location.search ? `${p}${window.location.search}` : p;
+  });
 
   function navigate(destination) {
     const nextPath = destination.replace(/\/+$/, "") || "/";
-    if (nextPath !== window.location.pathname) {
+    const currentFull = window.location.pathname + window.location.search;
+    if (nextPath !== currentFull) {
       window.history.pushState({}, "", nextPath);
     }
     setPath(nextPath);
@@ -29,11 +33,15 @@ export default function App() {
       "/deployments/detail": "Deployment #131",
       "/logs": "Observability logs",
     };
-    document.title = `DeployForge — ${titles[path] || "Platform"}`;
+    const currentBase = path.split("?")[0];
+    document.title = `DeployForge — ${titles[currentBase] || "Platform"}`;
   }, [path]);
 
   useEffect(() => {
-    const onPopState = () => setPath(window.location.pathname.replace(/\/+$/, "") || "/");
+    const onPopState = () => {
+      const p = window.location.pathname.replace(/\/+$/, "") || "/";
+      setPath(window.location.search ? `${p}${window.location.search}` : p);
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);

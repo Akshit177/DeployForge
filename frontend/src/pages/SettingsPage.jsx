@@ -19,6 +19,9 @@ import {
   CheckIcon,
   ExternalLinkIcon,
   SpinnerIcon,
+  DownloadIcon,
+  CopyIcon,
+  ContainerIcon,
 } from "../components/common/TechIcons.jsx";
 
 function timeAgo(dateString) {
@@ -30,6 +33,30 @@ function timeAgo(dateString) {
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
   return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+function parseEnvString(rawText) {
+  const lines = rawText.split("\n");
+  const parsed = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim().toUpperCase();
+    let val = trimmed.slice(eqIdx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    const isSecret = /SECRET|KEY|PASSWORD|PASS|TOKEN|CREDENTIAL|PRIVATE/i.test(key);
+    parsed.push({
+      key,
+      value: val,
+      isSecret,
+      is_secret: isSecret,
+    });
+  }
+  return parsed;
 }
 
 export default function SettingsPage() {
@@ -53,6 +80,10 @@ export default function SettingsPage() {
   // Environment variables state
   const [envVars, setEnvVars] = useState([]);
   const [isAddingVar, setIsAddingVar] = useState(false);
+  const [isBulkImporting, setIsBulkImporting] = useState(false);
+  const [bulkImportText, setBulkImportText] = useState("");
+  const [bulkImportSuccess, setBulkImportSuccess] = useState(false);
+  const [exportedCopied, setExportedCopied] = useState(false);
   const [newVarKey, setNewVarKey] = useState("");
   const [newVarVal, setNewVarVal] = useState("");
   const [isNewSecret, setIsNewSecret] = useState(true);
@@ -65,6 +96,7 @@ export default function SettingsPage() {
   ]);
   const [newDomain, setNewDomain] = useState("");
   const [isAddingDomain, setIsAddingDomain] = useState(false);
+  const [showDnsGuide, setShowDnsGuide] = useState(true);
   const [domainError, setDomainError] = useState("");
   const [domainLoading, setDomainLoading] = useState(false);
 
@@ -101,70 +133,65 @@ export default function SettingsPage() {
       .catch((err) => console.warn("Failed to load projects:", err));
   }, []);
 
-  // 2. Load environment variables for selected project
+  // 2. Load environment variables when selected project changes
   useEffect(() => {
-    if (!selectedProjectId) return;
+    if (!selectedProjectId) {
+      setEnvVars([]);
+      return;
+    }
+
     setEnvLoading(true);
+    setRevealedIds(new Set());
+    setUnmaskedValues({});
+
     fetchEnvVars(selectedProjectId)
       .then((vars) => {
         setEnvVars(vars);
       })
-      .catch((err) => console.warn("Could not load env vars:", err.message))
-      .finally(() => setEnvLoading(false));
+      .catch((err) => {
+        console.warn("Could not load env vars:", err.message);
+      })
+      .finally(() => {
+        setEnvLoading(false);
+      });
   }, [selectedProjectId]);
 
-  const handleSaveProfile = async (e) => {
+  const handleUpdateProfile = async (e) => {
     e.preventDefault();
-    setProfileError("");
     setProfileSaving(true);
+    setProfileError("");
+    setSaveSuccess(false);
+
     try {
-      await updateProfile({
-        name: displayName,
-        email,
-        github_connected: githubConnected,
-      });
+      await updateProfile({ name: displayName, email });
       setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      setTimeout(() => setSaveSuccess(false), 2500);
     } catch (err) {
-      setProfileError(err.message || "Failed to save profile");
+      setProfileError(err.message);
     } finally {
       setProfileSaving(false);
     }
   };
 
-  const handleToggleGithub = async () => {
-    const nextState = !githubConnected;
-    setGithubConnected(nextState);
-    try {
-      await updateProfile({ github_connected: nextState });
-    } catch (err) {
-      setGithubConnected(!nextState);
-      alert(`Could not update GitHub connection: ${err.message}`);
-    }
-  };
-
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
-    setPasswordError("");
-    setPasswordSuccess(false);
-
     if (newPassword.length < 8) {
       setPasswordError("New password must be at least 8 characters long.");
       return;
     }
 
     setPasswordLoading(true);
+    setPasswordError("");
+    setPasswordSuccess(false);
+
     try {
-      await updatePassword({
-        current_password: currentPassword,
-        new_password: newPassword,
-      });
+      await updatePassword({ currentPassword, newPassword });
       setPasswordSuccess(true);
       setCurrentPassword("");
       setNewPassword("");
       setTimeout(() => setPasswordSuccess(false), 3000);
     } catch (err) {
-      setPasswordError(err.message || "Failed to update password");
+      setPasswordError(err.message);
     } finally {
       setPasswordLoading(false);
     }
@@ -173,50 +200,24 @@ export default function SettingsPage() {
   const handleToggleFailureAlerts = async (checked) => {
     setNotifyFailures(checked);
     try {
-      await updateNotificationPreferences({ notify_failures: checked, notify_weekly: notifyWeekly });
+      await updateNotificationPreferences({
+        notify_failures: checked,
+        notify_weekly: notifyWeekly,
+      });
     } catch (err) {
-      console.warn("Could not save alert preferences:", err);
+      console.warn("Failed to update notification prefs:", err.message);
     }
   };
 
   const handleToggleWeeklyAlerts = async (checked) => {
     setNotifyWeekly(checked);
     try {
-      await updateNotificationPreferences({ notify_failures: notifyFailures, notify_weekly: checked });
+      await updateNotificationPreferences({
+        notify_failures: notifyFailures,
+        notify_weekly: checked,
+      });
     } catch (err) {
-      console.warn("Could not save alert preferences:", err);
-    }
-  };
-
-  const handleAddVariable = async (e) => {
-    e.preventDefault();
-    if (!newVarKey.trim() || !selectedProjectId) return;
-
-    try {
-      await saveEnvVars(selectedProjectId, [
-        {
-          key: newVarKey.trim().toUpperCase(),
-          value: newVarVal.trim(),
-          is_secret: isNewSecret,
-        },
-      ]);
-      const updated = await fetchEnvVars(selectedProjectId);
-      setEnvVars(updated);
-      setNewVarKey("");
-      setNewVarVal("");
-      setIsAddingVar(false);
-    } catch (err) {
-      alert(`Could not save secret: ${err.message}`);
-    }
-  };
-
-  const handleDeleteVariable = async (key, id) => {
-    if (!selectedProjectId) return;
-    try {
-      await deleteEnvVar(selectedProjectId, key || id);
-      setEnvVars((prev) => prev.filter((v) => v.key !== key && v.id !== id));
-    } catch (err) {
-      alert(`Failed to delete variable: ${err.message}`);
+      console.warn("Failed to update notification prefs:", err.message);
     }
   };
 
@@ -226,46 +227,148 @@ export default function SettingsPage() {
       nextRevealed.delete(id);
       setRevealedIds(nextRevealed);
     } else {
-      nextRevealed.add(id);
-      setRevealedIds(nextRevealed);
-      if (!unmaskedValues[id] && selectedProjectId) {
+      if (!unmaskedValues[id]) {
         try {
           const revealedList = await fetchEnvVars(selectedProjectId, { reveal: true });
-          const match = revealedList.find((v) => v.id === id || v.key === key);
-          if (match) {
-            setUnmaskedValues((prev) => ({ ...prev, [id]: match.value }));
+          const matched = revealedList.find((v) => v.id === id || v.key === key);
+          if (matched) {
+            setUnmaskedValues((prev) => ({ ...prev, [id]: matched.value }));
           }
         } catch (err) {
-          console.warn("Could not decrypt secret:", err.message);
+          console.warn("Could not unmask secret:", err);
         }
       }
+      nextRevealed.add(id);
+      setRevealedIds(nextRevealed);
+    }
+  };
+
+  const handleToggleRevealAll = async () => {
+    if (revealedIds.size > 0) {
+      setRevealedIds(new Set());
+    } else {
+      try {
+        const revealedList = await fetchEnvVars(selectedProjectId, { reveal: true });
+        const map = {};
+        const allIds = new Set();
+        revealedList.forEach((v) => {
+          map[v.id] = v.value;
+          allIds.add(v.id);
+        });
+        setUnmaskedValues(map);
+        setRevealedIds(allIds);
+      } catch (err) {
+        console.warn("Could not reveal all secrets:", err);
+      }
+    }
+  };
+
+  const handleAddVariable = async (e) => {
+    e.preventDefault();
+    if (!newVarKey.trim() || !selectedProjectId) return;
+
+    const newKey = newVarKey.trim().toUpperCase();
+    const updated = [
+      ...envVars.filter((v) => v.key !== newKey),
+      {
+        key: newKey,
+        value: newVarVal,
+        isSecret: isNewSecret,
+      },
+    ];
+
+    try {
+      const saved = await saveEnvVars(selectedProjectId, updated);
+      setEnvVars(saved);
+      setNewVarKey("");
+      setNewVarVal("");
+      setIsAddingVar(false);
+    } catch (err) {
+      alert(`Failed to save variable: ${err.message}`);
+    }
+  };
+
+  const handleBulkImport = async (e) => {
+    e.preventDefault();
+    if (!bulkImportText.trim() || !selectedProjectId) return;
+    const parsed = parseEnvString(bulkImportText);
+    if (parsed.length === 0) {
+      alert("No valid KEY=VALUE pairs found in pasted text.");
+      return;
+    }
+
+    // Merge parsed with existing
+    const existingKeys = new Set(parsed.map((p) => p.key));
+    const merged = [
+      ...envVars.filter((v) => !existingKeys.has(v.key)),
+      ...parsed,
+    ];
+
+    try {
+      const saved = await saveEnvVars(selectedProjectId, merged);
+      setEnvVars(saved);
+      setBulkImportText("");
+      setBulkImportSuccess(true);
+      setTimeout(() => {
+        setBulkImportSuccess(false);
+        setIsBulkImporting(false);
+      }, 1500);
+    } catch (err) {
+      alert(`Bulk import failed: ${err.message}`);
+    }
+  };
+
+  const handleExportEnv = () => {
+    if (envVars.length === 0) return;
+    const content = envVars
+      .map((v) => `${v.key}=${unmaskedValues[v.id] || v.value || ""}`)
+      .join("\n");
+    navigator.clipboard?.writeText(content);
+    setExportedCopied(true);
+    setTimeout(() => setExportedCopied(false), 2000);
+  };
+
+  const handleDeleteVariable = async (key, id) => {
+    if (!confirm(`Are you sure you want to delete variable ${key}?`)) return;
+    try {
+      await deleteEnvVar(selectedProjectId, key || id);
+      setEnvVars((prev) => prev.filter((v) => v.key !== key && v.id !== id));
+    } catch (err) {
+      alert(`Failed to delete variable: ${err.message}`);
     }
   };
 
   const handleAddDomain = async (e) => {
     e.preventDefault();
     if (!newDomain.trim()) return;
-    setDomainError("");
+
     setDomainLoading(true);
+    setDomainError("");
+
     try {
-      const added = await apiAddDomain(newDomain.trim().toLowerCase(), selectedProjectId || null);
+      const added = await apiAddDomain(newDomain.trim(), selectedProjectId || null);
       setDomains((prev) => [...prev, added]);
       setNewDomain("");
       setIsAddingDomain(false);
     } catch (err) {
-      setDomainError(err.message || "Failed to add domain");
+      setDomainError(err.message);
     } finally {
       setDomainLoading(false);
     }
   };
 
-  const handleDeleteDomain = async (domainId, domainName) => {
+  const handleDeleteDomain = async (id, name) => {
+    if (!confirm(`Delete custom domain "${name}"?`)) return;
     try {
-      await apiDeleteDomain(domainId || domainName);
-      setDomains((prev) => prev.filter((d) => d.id !== domainId && d.domain !== domainName));
+      await apiDeleteDomain(id || name);
+      setDomains((prev) => prev.filter((d) => d.id !== id && d.domain !== name));
     } catch (err) {
-      alert(`Could not remove domain: ${err.message}`);
+      alert(`Failed to delete domain: ${err.message}`);
     }
+  };
+
+  const handleToggleGithub = () => {
+    setGithubConnected(!githubConnected);
   };
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
@@ -275,24 +378,24 @@ export default function SettingsPage() {
       {/* Page Heading */}
       <div className="figma-page-header">
         <div>
-          <h1 className="figma-page-title">Settings</h1>
+          <h1 className="figma-page-title">Workspace Settings</h1>
           <p className="figma-page-subtitle">
-            Manage your personal profile, account security, encrypted environment variables, domains, and alert preferences.
+            Configure profile credentials, environment secrets, custom domains, and platform telemetry.
           </p>
         </div>
       </div>
 
-      <div className="settings-sections-stack">
-        {/* Section 1: User Profile & Connected Accounts */}
+      <div className="settings-sections-list">
+        {/* Section 1: User Profile */}
         <section className="settings-section-card" aria-label="Profile settings">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Personal Profile</h2>
             <p className="section-col-desc">
-              Your name and email address for platform notifications and team access.
+              Your name and primary notification email address within the DeployForge cluster.
             </p>
           </div>
 
-          <form onSubmit={handleSaveProfile} className="settings-form-col">
+          <form onSubmit={handleUpdateProfile} className="settings-form-col">
             {profileError && (
               <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
                 {profileError}
@@ -437,16 +540,81 @@ export default function SettingsPage() {
                 ))}
               </select>
 
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                onClick={() => setIsAddingVar(!isAddingVar)}
-              >
-                <PlusIcon size={12} />
-                <span>{isAddingVar ? "Close" : "Add Secret"}</span>
-              </button>
+              <div style={{ display: "flex", gap: "6px", marginLeft: "auto" }}>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={handleToggleRevealAll}
+                  title="Toggle mask on all secrets"
+                >
+                  {revealedIds.size > 0 ? <EyeOffIcon size={12} /> : <EyeIcon size={12} />}
+                  <span>{revealedIds.size > 0 ? "Mask All" : "Reveal All"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={handleExportEnv}
+                  title="Copy variables to clipboard"
+                >
+                  <CopyIcon size={12} />
+                  <span>{exportedCopied ? "Copied!" : "Export .env"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => setIsBulkImporting(!isBulkImporting)}
+                >
+                  <span>{isBulkImporting ? "Close Bulk" : "Bulk Import"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => setIsAddingVar(!isAddingVar)}
+                >
+                  <PlusIcon size={12} />
+                  <span>{isAddingVar ? "Close" : "Add Secret"}</span>
+                </button>
+              </div>
             </div>
 
+            {/* Bulk Import Drawer */}
+            {isBulkImporting && (
+              <form onSubmit={handleBulkImport} className="add-variable-drawer" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <span style={{ fontSize: "12px", color: "var(--text-secondary)", fontWeight: "600" }}>
+                  Paste .env variables (one per line)
+                </span>
+                <textarea
+                  className="env-bulk-textarea"
+                  value={bulkImportText}
+                  onChange={(e) => setBulkImportText(e.target.value)}
+                  placeholder="DATABASE_URL=postgres://user:pass@host:5432/app&#10;JWT_SECRET=sk_live_987654321&#10;CACHE_TTL=3600"
+                  required
+                />
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <button type="submit" className="btn-primary btn-sm">
+                    Save to Vault
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => setIsBulkImporting(false)}
+                  >
+                    Cancel
+                  </button>
+                  {bulkImportSuccess && (
+                    <span className="save-feedback-pill" style={{ marginLeft: "auto" }}>
+                      <CheckIcon size={12} />
+                      <span>Variables imported!</span>
+                    </span>
+                  )}
+                </div>
+              </form>
+            )}
+
+            {/* Single Var Add Drawer */}
             {isAddingVar && (
               <form onSubmit={handleAddVariable} className="add-variable-drawer">
                 <input
@@ -555,10 +723,10 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* Section 4: Custom Domains */}
+        {/* Section 4: Custom Domains & DNS Routing */}
         <section className="settings-section-card" aria-label="Custom domains">
           <div className="settings-intro-col">
-            <h2 className="section-col-title">Custom Domains</h2>
+            <h2 className="section-col-title">Custom Domains & DNS</h2>
             <p className="section-col-desc">
               Point your domain to DeployForge using a CNAME record to route public traffic through Nginx.
             </p>
@@ -642,10 +810,84 @@ export default function SettingsPage() {
                 <span>Add Domain</span>
               </button>
             )}
+
+            {/* DNS CNAME Configuration Guide */}
+            {showDnsGuide && (
+              <div className="dns-guide-box">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <strong style={{ fontSize: "12px", color: "#ffffff" }}>DNS CNAME Record Guide</strong>
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Automatic TLS Provisioning</span>
+                </div>
+                <table className="dns-records-table">
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Name / Host</th>
+                      <th>Target Value</th>
+                      <th>TTL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>CNAME</code></td>
+                      <td><code>app</code> or <code>@</code></td>
+                      <td><code>ingress.deployforge.app</code></td>
+                      <td>300s (Auto)</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </section>
 
-        {/* Section 5: Notifications & Alert Preferences */}
+        {/* Section 5: Platform Architecture & Diagnostics Widget */}
+        <section className="settings-section-card" aria-label="Platform telemetry">
+          <div className="settings-intro-col">
+            <h2 className="section-col-title">Platform Architecture</h2>
+            <p className="section-col-desc">
+              Live telemetry and orchestration status across the platform core engine components.
+            </p>
+          </div>
+
+          <div className="settings-form-col">
+            <div className="diagnostics-grid">
+              <div className="diag-item-card">
+                <div className="diag-info-left">
+                  <span className="diag-title">PostgreSQL Database</span>
+                  <span className="diag-desc">Connection Pool & Outbox Events</span>
+                </div>
+                <span className="diag-status-pill">Connected</span>
+              </div>
+
+              <div className="diag-item-card">
+                <div className="diag-info-left">
+                  <span className="diag-title">Redis Streams Broker</span>
+                  <span className="diag-desc">stream:deployment_events (PEL active)</span>
+                </div>
+                <span className="diag-status-pill">Healthy</span>
+              </div>
+
+              <div className="diag-item-card">
+                <div className="diag-info-left">
+                  <span className="diag-title">Docker Engine API</span>
+                  <span className="diag-desc">Dual-Mode Client (/var/run/docker.sock)</span>
+                </div>
+                <span className="diag-status-pill">Active</span>
+              </div>
+
+              <div className="diag-item-card">
+                <div className="diag-info-left">
+                  <span className="diag-title">Nginx Alpine Data Plane</span>
+                  <span className="diag-desc">deployforge-apps Network (Zero-Downtime)</span>
+                </div>
+                <span className="diag-status-pill">Operational</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Section 6: Notifications & Alert Preferences */}
         <section className="settings-section-card" aria-label="Notification settings">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Alert Preferences</h2>

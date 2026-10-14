@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import BrandLogo from "../common/BrandLogo.jsx";
 import CommandPalette from "../common/CommandPalette.jsx";
 import { getCurrentUser, logout } from "../../services/authService.js";
+import { fetchDeployments } from "../../services/deploymentService.js";
 import {
   ProjectsNavIcon,
   DeploymentsNavIcon,
@@ -15,17 +16,11 @@ import {
   SignOutIcon,
 } from "../common/TechIcons.jsx";
 
-const navLinks = [
-  { label: "Projects", path: "/projects", Icon: ProjectsNavIcon },
-  { label: "Deployments", path: "/deployments", Icon: DeploymentsNavIcon, count: "131" },
-  { label: "Logs", path: "/logs", Icon: LogsNavIcon, count: "Live" },
-  { label: "Settings", path: "/settings", Icon: SettingsNavIcon },
-];
-
 export default function AppShell({ path, navigate, children }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [deploymentCount, setDeploymentCount] = useState(null);
 
   useEffect(() => {
     getCurrentUser()
@@ -33,7 +28,27 @@ export default function AppShell({ path, navigate, children }) {
         if (user) setCurrentUser(user);
       })
       .catch(() => {});
-  }, []);
+
+    fetchDeployments()
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setDeploymentCount(list.length);
+        }
+      })
+      .catch(() => {});
+  }, [path]);
+
+  const navLinks = [
+    { label: "Projects", path: "/projects", Icon: ProjectsNavIcon },
+    {
+      label: "Deployments",
+      path: "/deployments",
+      Icon: DeploymentsNavIcon,
+      count: deploymentCount !== null ? String(deploymentCount) : undefined,
+    },
+    { label: "Logs", path: "/logs", Icon: LogsNavIcon, count: "Live" },
+    { label: "Settings", path: "/settings", Icon: SettingsNavIcon },
+  ];
 
   const handleLogout = async () => {
     try {
@@ -201,6 +216,11 @@ export default function AppShell({ path, navigate, children }) {
           </div>
 
           <div className="topbar-right">
+            <div className="topbar-status-pill" title="DeployForge Platform Services Online">
+              <span className="status-indicator status-dot green-pulse" style={{ display: "inline-block", width: "7px", height: "7px" }} />
+              <span className="status-pill-text" style={{ fontSize: "12px", color: "var(--text-secondary)", fontWeight: 500 }}>System Online</span>
+            </div>
+
             <button
               type="button"
               className="quick-search-btn"
