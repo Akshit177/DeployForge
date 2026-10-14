@@ -4,7 +4,9 @@ const { authenticateToken } = require("../middleware/auth.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
-const { getDeploymentHotState, setDeploymentHotState } = require("../services/hotState.js");
+const { getDeploymentHotState, setDeploymentHotState, deleteDeploymentHotState } = require("../services/hotState.js");
+const { stopContainer, removeContainer } = require("../services/dockerClient.js");
+const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
 
 const router = express.Router();
 
@@ -495,6 +497,18 @@ router.post("/:id/cancel", async (req, res) => {
       [current.project_id]
     );
 
+    // Clean up container, route, and hot state on cancellation
+    if (current.container_id) {
+      stopContainer(current.container_id).catch(() => {});
+      removeContainer(current.container_id).catch(() => {});
+    }
+
+    const domainToUnregister = current.url || (check.rows[0] && check.rows[0].domain);
+    if (domainToUnregister) {
+      unregisterUpstreamRoute(domainToUnregister);
+    }
+    deleteDeploymentHotState(current.id).catch(() => {});
+
     await recordLog(
       current.id,
       current.project_id,
@@ -511,6 +525,73 @@ router.post("/:id/cancel", async (req, res) => {
   } catch (error) {
     console.error("Failed to cancel deployment:", error);
     return res.status(500).json({ message: "Unable to cancel deployment." });
+  }
+});
+
+// POST /api/deployments/:id/stop - Stop an active running deployment and cleanup container
+router.post("/:id/stop", async (req, res) => {
+  const { id } = req.params;
+
+  if (!UUID_REGEX.test(id) && !/^\d+$/.test(id)) {
+    return res.status(400).json({ message: "Invalid deployment ID format." });
+  }
+
+  try {
+    const checkQuery = `
+      SELECT d.*, p.id AS project_id, p.domain AS project_domain
+      FROM deployments d
+      JOIN projects p ON d.project_id = p.id
+      WHERE ${UUID_REGEX.test(id) ? "d.id = $1" : "d.deployment_number = $1"} AND d.user_id = $2
+    `;
+    const check = await pool.query(checkQuery, [id, req.user.id]);
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({ message: "Deployment not found." });
+    }
+
+    const current = check.rows[0];
+
+    const stopRes = await pool.query(
+      `UPDATE deployments
+       SET status = 'Stopped', updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [current.id]
+    );
+
+    await pool.query(
+      `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
+      [current.project_id]
+    );
+
+    // Clean up container, route, and hot state on stop
+    if (current.container_id) {
+      stopContainer(current.container_id).catch(() => {});
+      removeContainer(current.container_id).catch(() => {});
+    }
+
+    const domainToUnregister = current.url || current.project_domain;
+    if (domainToUnregister) {
+      unregisterUpstreamRoute(domainToUnregister);
+    }
+    deleteDeploymentHotState(current.id).catch(() => {});
+
+    await recordLog(
+      current.id,
+      current.project_id,
+      req.user.id,
+      "WARN",
+      "system",
+      `Deployment #${stopRes.rows[0].deployment_number} was stopped by user.`
+    );
+
+    return res.status(200).json({
+      message: `Deployment #${stopRes.rows[0].deployment_number} has been stopped.`,
+      deployment: formatDeployment(stopRes.rows[0]),
+    });
+  } catch (error) {
+    console.error("Failed to stop deployment:", error);
+    return res.status(500).json({ message: "Unable to stop deployment." });
   }
 });
 

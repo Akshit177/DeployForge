@@ -1,0 +1,121 @@
+services:
+  # ==============================================================================
+  # PostgreSQL 16 - Durable System of Record & Transactional Outbox
+  # ==============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: deployforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-deployforge}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    networks:
+      - deployforge-control
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-deployforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ==============================================================================
+  # Redis 7 - Job Queues, Fast Sessions & Rapid Deployment Hot State
+  # ==============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: deployforge-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - deployforge-control
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ==============================================================================
+  # DeployForge API & Deployment Worker (Control Plane)
+  # ==============================================================================
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: deployforge-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-deployforge}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:-super-secret-deployforge-key-change-me}
+      CLIENT_URL: ${CLIENT_URL:-http://localhost}
+      DOCKER_MODE: ${DOCKER_MODE:-real}
+      APP_NETWORK: deployforge-apps
+      WORKSPACE_BASE_PATH: /var/lib/deployforge/workspaces
+      NGINX_UPSTREAMS_PATH: /app/nginx/conf.d/deployforge-upstreams.conf
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - workspaces_data:/var/lib/deployforge/workspaces
+      - ./nginx/conf.d:/app/nginx/conf.d
+    networks:
+      - deployforge-control
+      - deployforge-apps
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ==============================================================================
+  # Nginx Data Plane - Reverse Proxy & Edge Ingress Routing
+  # ==============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: deployforge-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    networks:
+      - deployforge-control
+      - deployforge-apps
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+# ==============================================================================
+# Isolated Networks (Service Boundary Separation)
+# ==============================================================================
+networks:
+  # Internal control plane network (Database, Cache, API - inaccessible from outside)
+  deployforge-control:
+    driver: bridge
+  # Dedicated application network (Shared between Nginx and deployed apps for internal DNS routing)
+  deployforge-apps:
+    driver: bridge
+
+# ==============================================================================
+# Persistent Volumes
+# ==============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  workspaces_data:

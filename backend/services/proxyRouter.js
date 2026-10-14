@@ -24,6 +24,12 @@ function registerUpstreamRoute(domain, routeInfo) {
   };
 
   routingTable.set(normalizedDomain, entry);
+
+  try {
+    const { syncNginxConfig } = require("./nginxManager.js");
+    syncNginxConfig().catch(() => {});
+  } catch (_) {}
+
   return entry;
 }
 
@@ -32,7 +38,16 @@ function registerUpstreamRoute(domain, routeInfo) {
  */
 function unregisterUpstreamRoute(domain) {
   if (!domain) return false;
-  return routingTable.delete(domain.toLowerCase().trim());
+  const deleted = routingTable.delete(domain.toLowerCase().trim());
+
+  if (deleted) {
+    try {
+      const { syncNginxConfig } = require("./nginxManager.js");
+      syncNginxConfig().catch(() => {});
+    } catch (_) {}
+  }
+
+  return deleted;
 }
 
 /**
@@ -76,6 +91,11 @@ async function syncFromDatabase() {
         });
       }
     }
+
+    try {
+      const { syncNginxConfig } = require("./nginxManager.js");
+      syncNginxConfig().catch(() => {});
+    } catch (_) {}
 
     return getRoutingTable();
   } catch (err) {

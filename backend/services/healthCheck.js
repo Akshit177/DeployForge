@@ -2,10 +2,11 @@ const http = require("http");
 const net = require("net");
 const pool = require("../config/db.js");
 const { recordWorkerLog } = require("./logEmitter.js");
+const { getMode } = require("./dockerClient.js");
 
 /**
  * Checks TCP socket or HTTP connectivity for a container port.
- * Supports realistic simulation when external container is not running on localhost.
+ * Supports realistic simulation when in simulator mode, and strict real probing in real mode.
  */
 async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = "/", timeoutMs = 2000 }) {
   const startTime = Date.now();
@@ -35,7 +36,21 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
 
     req.on("timeout", () => {
       req.destroy();
-      // In local dev without Docker containers bound to host port, fallback to simulated healthy container response
+      // In real Docker mode, failure to reach container must report as unhealthy
+      if (getMode() === "real") {
+        return resolve({
+          healthy: false,
+          statusCode: 504,
+          latencyMs: timeoutMs,
+          method: "HTTP",
+          host,
+          port,
+          error: "Health check probe timed out",
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // In local simulator mode, return simulated healthy container response
       const latencyMs = Math.floor(Math.random() * 8) + 2;
       resolve({
         healthy: true,
@@ -48,9 +63,22 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
       });
     });
 
-    req.on("error", () => {
-      // If port is not open on local machine (typical in dev without active docker container),
-      // simulate realistic container health response
+    req.on("error", (err) => {
+      // In real Docker mode, network error must report as unhealthy
+      if (getMode() === "real") {
+        return resolve({
+          healthy: false,
+          statusCode: 502,
+          latencyMs: Date.now() - startTime,
+          method: "HTTP",
+          host,
+          port,
+          error: err.message,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // In local simulator mode, return simulated healthy container response
       const latencyMs = Math.floor(Math.random() * 8) + 2;
       resolve({
         healthy: true,
