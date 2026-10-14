@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     github_connected BOOLEAN DEFAULT false NOT NULL,
+    github_username VARCHAR(255),
     notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL

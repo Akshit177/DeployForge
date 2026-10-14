@@ -12,6 +12,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   CheckIcon,
+  CloseIcon,
   SpinnerIcon,
   ExternalLinkIcon,
   CopyIcon,
@@ -106,12 +107,38 @@ function serializeEnvVars(vars) {
   return vars.map((v) => `${v.key}=${v.value}`).join("\n");
 }
 
+function validateGitHubRepoUrl(url) {
+  if (!url || typeof url !== "string" || !url.trim()) {
+    return { valid: false, error: "GitHub repository URL is required." };
+  }
+  const trimmed = url.trim();
+  const httpsRegex = /^https?:\/\/github\.com\/([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+)(?:\.git)?\/?$/i;
+  const sshRegex = /^git@github\.com:([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+)(?:\.git)?\/?$/i;
+
+  if (!httpsRegex.test(trimmed) && !sshRegex.test(trimmed)) {
+    if (!trimmed.toLowerCase().includes("github.com")) {
+      return {
+        valid: false,
+        error: "Invalid repository provider. Only GitHub repositories (https://github.com/owner/repository) are supported.",
+      };
+    }
+    return {
+      valid: false,
+      error: "Invalid GitHub repository link format. Must be in the format: https://github.com/organization/repository",
+    };
+  }
+  return { valid: true };
+}
+
 export default function NewProjectPage({ navigate, searchParams }) {
   const [repoUrl, setRepoUrl] = useState("https://github.com/acme/web-app");
+  const [repoUrlError, setRepoUrlError] = useState("");
   const [projectName, setProjectName] = useState("web-app");
+  const [nameError, setNameError] = useState("");
   const [branch, setBranch] = useState("main");
   const [selectedRuntime, setSelectedRuntime] = useState("node");
   const [port, setPort] = useState("3000");
+  const [portError, setPortError] = useState("");
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState(false);
@@ -204,15 +231,45 @@ export default function NewProjectPage({ navigate, searchParams }) {
       setErrorMessage("Python container runtime is arriving in Phase D and is currently disabled.");
       return;
     }
+
+    // Validate GitHub Repo URL
+    const repoValidation = validateGitHubRepoUrl(repoUrl);
+    if (!repoValidation.valid) {
+      setRepoUrlError(repoValidation.error);
+      setErrorMessage(repoValidation.error);
+      return;
+    }
+    setRepoUrlError("");
+
+    // Validate Project Name
+    const cleanName = projectName.trim();
+    if (cleanName.length < 2 || cleanName.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(cleanName)) {
+      const err = "Project name must be 2-64 characters long and contain only letters, numbers, hyphens, and underscores.";
+      setNameError(err);
+      setErrorMessage(err);
+      return;
+    }
+    setNameError("");
+
+    // Validate Port
+    const parsedPort = Number.parseInt(port, 10);
+    if (Number.isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      const err = "Internal container port must be a valid port number between 1 and 65535.";
+      setPortError(err);
+      setErrorMessage(err);
+      return;
+    }
+    setPortError("");
+
     setIsDeploying(true);
     setErrorMessage("");
     try {
       await createProject({
-        name: projectName,
-        repository_url: repoUrl,
-        branch,
+        name: cleanName,
+        repository_url: repoUrl.trim(),
+        branch: branch.trim() || "main",
         runtime: selectedRuntime,
-        port: Number.parseInt(port, 10) || 3000,
+        port: parsedPort,
         auto_deploy: autoDeploy,
         env_vars: envVars.map(({ key, value, isSecret }) => ({ key, value, isSecret })),
       });
@@ -325,11 +382,33 @@ export default function NewProjectPage({ navigate, searchParams }) {
                   required
                   type="url"
                   value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setRepoUrl(val);
+                    if (repoUrlError) {
+                      const v = validateGitHubRepoUrl(val);
+                      if (v.valid) setRepoUrlError("");
+                    }
+                  }}
+                  onBlur={() => {
+                    if (repoUrl) {
+                      const v = validateGitHubRepoUrl(repoUrl);
+                      if (!v.valid) setRepoUrlError(v.error);
+                      else setRepoUrlError("");
+                    }
+                  }}
                   placeholder="https://github.com/organization/repository"
+                  style={repoUrlError ? { borderColor: "#ef4444" } : {}}
                 />
               </div>
-              <span className="field-hint">Public repository. Cloned securely into isolated deployment workspace.</span>
+              {repoUrlError ? (
+                <span className="field-error-text">
+                  <CloseIcon size={11} />
+                  <span>{repoUrlError}</span>
+                </span>
+              ) : (
+                <span className="field-hint">Public repository. Cloned securely into isolated deployment workspace.</span>
+              )}
             </div>
 
             {/* Two-Column: Project Name & Branch */}
@@ -340,9 +419,19 @@ export default function NewProjectPage({ navigate, searchParams }) {
                   id="project-name"
                   required
                   value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
+                  onChange={(e) => {
+                    setProjectName(e.target.value);
+                    if (nameError) setNameError("");
+                  }}
                   placeholder="my-app"
+                  style={nameError ? { borderColor: "#ef4444" } : {}}
                 />
+                {nameError && (
+                  <span className="field-error-text">
+                    <CloseIcon size={11} />
+                    <span>{nameError}</span>
+                  </span>
+                )}
               </div>
 
               <div className="form-field-block">
@@ -398,11 +487,21 @@ export default function NewProjectPage({ navigate, searchParams }) {
                 required
                 type="number"
                 value={port}
-                onChange={(e) => setPort(e.target.value)}
+                onChange={(e) => {
+                  setPort(e.target.value);
+                  if (portError) setPortError("");
+                }}
                 placeholder="3000"
-                style={{ width: "160px" }}
+                style={{ width: "160px", ...(portError ? { borderColor: "#ef4444" } : {}) }}
               />
-              <span className="field-hint">The port your application server listens on inside the Docker container.</span>
+              {portError ? (
+                <span className="field-error-text">
+                  <CloseIcon size={11} />
+                  <span>{portError}</span>
+                </span>
+              ) : (
+                <span className="field-hint">The port your application server listens on inside the Docker container.</span>
+              )}
             </div>
 
             {/* Environment Variables Editor: Form vs Bulk */}

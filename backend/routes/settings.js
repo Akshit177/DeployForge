@@ -16,6 +16,7 @@ function formatProfile(user) {
     user_name: user.name || user.user_name,
     email: user.email,
     github_connected: Boolean(user.github_connected),
+    github_username: user.github_username || null,
     notification_preferences: user.notification_preferences || {
       notify_failures: true,
       notify_weekly: false,
@@ -35,7 +36,7 @@ router.use(authenticateToken);
 router.get("/", async (req, res) => {
   try {
     const userResult = await pool.query(
-      `SELECT id, name, email, github_connected, notification_preferences, created_at, updated_at
+      `SELECT id, name, email, github_connected, github_username, notification_preferences, created_at, updated_at
        FROM users WHERE id = $1`,
       [req.user.id]
     );
@@ -64,10 +65,12 @@ router.get("/", async (req, res) => {
 
 /**
  * PUT /api/settings/profile
- * Update personal profile (name, email, github_connected)
+ * Update personal profile (name, email, github_connected, github_username)
+ * Verifies current password if supplied
  */
 router.put("/profile", async (req, res) => {
-  const { name, email, github_connected } = req.body;
+  const { name, email, github_connected, github_username, current_password, currentPassword } = req.body;
+  const passToCheck = current_password || currentPassword;
 
   if (name !== undefined && (typeof name !== "string" || name.trim().length < 2)) {
     return res.status(400).json({ message: "Name must be at least 2 characters long." });
@@ -91,18 +94,32 @@ router.put("/profile", async (req, res) => {
   }
 
   try {
+    // If password provided for verification, check it against stored hash
+    if (passToCheck !== undefined && passToCheck !== null && passToCheck !== "") {
+      const userCheck = await pool.query("SELECT password_hash FROM users WHERE id = $1", [req.user.id]);
+      if (userCheck.rows.length === 0) {
+        return res.status(404).json({ message: "User not found." });
+      }
+      const isMatch = await bcrypt.compare(passToCheck, userCheck.rows[0].password_hash);
+      if (!isMatch) {
+        return res.status(400).json({ message: "Current password verification failed. Incorrect password." });
+      }
+    }
+
     const result = await pool.query(
       `UPDATE users
        SET name = COALESCE($1, name),
            email = COALESCE($2, email),
            github_connected = COALESCE($3, github_connected),
+           github_username = CASE WHEN $3 = false THEN NULL ELSE COALESCE($4, github_username) END,
            updated_at = NOW()
-       WHERE id = $4
-       RETURNING id, name, email, github_connected, notification_preferences, created_at, updated_at`,
+       WHERE id = $5
+       RETURNING id, name, email, github_connected, github_username, notification_preferences, created_at, updated_at`,
       [
         name ? name.trim() : null,
         normalizedEmail || null,
         github_connected !== undefined ? Boolean(github_connected) : null,
+        github_username !== undefined ? (github_username ? String(github_username).trim() : null) : null,
         req.user.id,
       ]
     );

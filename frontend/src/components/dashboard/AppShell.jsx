@@ -174,16 +174,6 @@ export default function AppShell({ path, navigate, children }) {
         <div className="sidebar-bottom">
           <button
             type="button"
-            className="sidebar-bottom-link"
-            onClick={() => handleNav("/")}
-          >
-            <span className="bottom-link-icon">
-              <ExternalLinkIcon size={14} />
-            </span>
-            <span>Platform Overview</span>
-          </button>
-          <button
-            type="button"
             className="sidebar-bottom-link logout"
             onClick={handleLogout}
           >

@@ -10,9 +10,12 @@ import {
   DownloadIcon,
   TerminalIcon,
   SpinnerIcon,
+  PlusIcon,
 } from "../components/common/TechIcons.jsx";
 
-export default function LogsPage() {
+const MAX_LOG_BUFFER = 400;
+
+export default function LogsPage({ navigate }) {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [isLive, setIsLive] = useState(true);
@@ -21,6 +24,7 @@ export default function LogsPage() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [streamConnected, setStreamConnected] = useState(false);
   const scrollContainerRef = useRef(null);
 
   // 1. Fetch user projects to populate project selector
@@ -39,6 +43,7 @@ export default function LogsPage() {
   useEffect(() => {
     let cleanupStream = null;
     setLoading(true);
+    setStreamConnected(false);
 
     const loadHistorical = async () => {
       try {
@@ -46,7 +51,7 @@ export default function LogsPage() {
           project_id: selectedProjectId || undefined,
           limit: 150,
         });
-        setLogs(historical);
+        setLogs(historical.slice(-MAX_LOG_BUFFER));
       } catch (err) {
         console.warn("Could not fetch historical logs:", err.message);
       } finally {
@@ -61,22 +66,24 @@ export default function LogsPage() {
         { project_id: selectedProjectId || undefined },
         {
           onInit: (initialBatch) => {
+            setStreamConnected(true);
             if (Array.isArray(initialBatch) && initialBatch.length > 0) {
               setLogs((prev) => {
                 const existingIds = new Set(prev.map((l) => l.id));
                 const newLines = initialBatch.filter((l) => !existingIds.has(l.id));
-                return [...prev, ...newLines];
+                return [...prev, ...newLines].slice(-MAX_LOG_BUFFER);
               });
             }
           },
           onLog: (newEntry) => {
+            setStreamConnected(true);
             setLogs((prev) => {
               if (prev.some((l) => l.id === newEntry.id)) return prev;
-              return [...prev.slice(-400), newEntry];
+              return [...prev, newEntry].slice(-MAX_LOG_BUFFER);
             });
           },
           onError: () => {
-            // Silently retry or maintain state
+            setStreamConnected(false);
           },
         }
       );
@@ -88,6 +95,18 @@ export default function LogsPage() {
       }
     };
   }, [selectedProjectId, isLive]);
+
+  // Handle user manual scroll up vs bottom
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
+    if (!isAtBottom && autoScroll) {
+      setAutoScroll(false);
+    } else if (isAtBottom && !autoScroll) {
+      setAutoScroll(true);
+    }
+  };
 
   // Auto-scroll follow
   useEffect(() => {
@@ -103,9 +122,11 @@ export default function LogsPage() {
         filterLevel === "All" || lvl === filterLevel.toUpperCase();
       const text = log.text || log.message || "";
       const time = log.time || "";
+      const cleanSearch = searchQuery.trim().toLowerCase();
       const matchesSearch =
-        text.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        time.toLowerCase().includes(searchQuery.toLowerCase());
+        !cleanSearch ||
+        text.toLowerCase().includes(cleanSearch) ||
+        time.toLowerCase().includes(cleanSearch);
       return matchesLevel && matchesSearch;
     });
   }, [logs, filterLevel, searchQuery]);
@@ -126,6 +147,8 @@ export default function LogsPage() {
   const handleClear = () => {
     setLogs([]);
   };
+
+  const activeProject = projects.find((p) => p.id === selectedProjectId);
 
   return (
     <div className="logs-page reveal">
@@ -160,7 +183,7 @@ export default function LogsPage() {
 
           <div className="stream-live-actions">
             <div className="live-status-pill">
-              <span className={`status-indicator status-dot ${isLive ? "green-pulse" : "gray"}`} />
+              <span className={`status-indicator status-dot ${isLive && streamConnected ? "green-pulse" : isLive ? "amber" : "gray"}`} />
               <span>{isLive ? `Live SSE Stream (${logs.length} entries)` : "Stream Paused"}</span>
             </div>
 
@@ -211,7 +234,8 @@ export default function LogsPage() {
               className="search-input"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search log output..."
+              maxLength={80}
+              placeholder="Search log output (max 80 chars)..."
               aria-label="Search logs"
             />
             {searchQuery && (
@@ -238,7 +262,7 @@ export default function LogsPage() {
             <span className="window-dot dot-green" />
             <span className="term-window-title">
               <TerminalIcon size={12} className="inline-term-svg" />
-              <span>stdout/stderr live output</span>
+              <span>{activeProject ? `${activeProject.name} — stdout/stderr stream` : "workspace live log stream"}</span>
             </span>
           </div>
 
@@ -274,11 +298,31 @@ export default function LogsPage() {
         </div>
 
         {/* Log Lines Stream Body */}
-        <div className="term-scroll-viewport" ref={scrollContainerRef}>
+        <div
+          className="term-scroll-viewport"
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+        >
           {loading ? (
             <div className="term-loading-row">
               <SpinnerIcon size={18} className="spin" />
               <span>Connecting to log stream socket...</span>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="term-empty-row" style={{ padding: "40px 20px" }}>
+              <p style={{ marginBottom: "12px", color: "var(--text-secondary)" }}>
+                No applications registered in this workspace yet. Create and deploy a project to begin streaming runtime logs.
+              </p>
+              {navigate && (
+                <button
+                  type="button"
+                  className="btn-primary btn-sm"
+                  onClick={() => navigate("/projects/new")}
+                >
+                  <PlusIcon size={12} />
+                  <span>Import your first project</span>
+                </button>
+              )}
             </div>
           ) : filteredLogs.length > 0 ? (
             filteredLogs.map((log) => {

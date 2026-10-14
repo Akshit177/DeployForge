@@ -9,6 +9,8 @@ import {
   updateNotificationPreferences,
   addDomain as apiAddDomain,
   deleteDomain as apiDeleteDomain,
+  validateGitHubProfile,
+  verifyGitHubProfileExists,
 } from "../services/settingsService.js";
 import {
   GitHubIcon,
@@ -17,9 +19,9 @@ import {
   EyeIcon,
   EyeOffIcon,
   CheckIcon,
+  CloseIcon,
   ExternalLinkIcon,
   SpinnerIcon,
-  DownloadIcon,
   CopyIcon,
   ContainerIcon,
 } from "../components/common/TechIcons.jsx";
@@ -35,18 +37,36 @@ function timeAgo(dateString) {
   return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
+const USERNAME_REGEX = /^[a-zA-Z0-9_\-\s]{2,50}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ENV_KEY_REGEX = /^[A-Z_][A-Z0-9_]*$/;
+const DOMAIN_REGEX = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/;
+
 function parseEnvString(rawText) {
   const lines = rawText.split("\n");
   const parsed = [];
-  for (const line of lines) {
+  const errors = [];
+
+  lines.forEach((line, index) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (!trimmed || trimmed.startsWith("#")) return;
     const eqIdx = trimmed.indexOf("=");
-    if (eqIdx <= 0) continue;
+    if (eqIdx <= 0) {
+      errors.push(`Line ${index + 1}: Missing "=" separator between key and value.`);
+      return;
+    }
     const key = trimmed.slice(0, eqIdx).trim().toUpperCase();
+    if (!ENV_KEY_REGEX.test(key)) {
+      errors.push(`Line ${index + 1}: Invalid variable key "${key}". Must contain only uppercase letters, numbers, and underscores.`);
+      return;
+    }
     let val = trimmed.slice(eqIdx + 1).trim();
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
+    }
+    if (val.length > 10000) {
+      errors.push(`Line ${index + 1}: Value for "${key}" exceeds 10,000 characters limit.`);
+      return;
     }
     const isSecret = /SECRET|KEY|PASSWORD|PASS|TOKEN|CREDENTIAL|PRIVATE/i.test(key);
     parsed.push({
@@ -55,42 +75,56 @@ function parseEnvString(rawText) {
       isSecret,
       is_secret: isSecret,
     });
-  }
-  return parsed;
+  });
+
+  return { parsed, errors };
 }
 
 export default function SettingsPage() {
+  // Personal Profile
   const [displayName, setDisplayName] = useState("Developer");
   const [email, setEmail] = useState("developer@deployforge.dev");
-  const [githubConnected, setGithubConnected] = useState(false);
-  const [projects, setProjects] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [profilePassword, setProfilePassword] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
-  const [envLoading, setEnvLoading] = useState(false);
+  const [profileSuccess, setProfileSuccess] = useState(false);
 
-  // Password state
+  // GitHub Account Linking
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubUsername, setGithubUsername] = useState("");
+  const [githubInput, setGithubInput] = useState("");
+  const [githubLinking, setGithubLinking] = useState(false);
+  const [githubError, setGithubError] = useState("");
+  const [githubSuccess, setGithubSuccess] = useState("");
+  const [isLinkingGithub, setIsLinkingGithub] = useState(false);
+
+  // Password Rotation
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [passwordLoading, setPasswordLoading] = useState(false);
   const [passwordError, setPasswordError] = useState("");
 
-  // Environment variables state
+  // Projects & Env Vars
+  const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [envLoading, setEnvLoading] = useState(false);
   const [envVars, setEnvVars] = useState([]);
   const [isAddingVar, setIsAddingVar] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkImportText, setBulkImportText] = useState("");
+  const [bulkImportErrors, setBulkImportErrors] = useState([]);
   const [bulkImportSuccess, setBulkImportSuccess] = useState(false);
   const [exportedCopied, setExportedCopied] = useState(false);
   const [newVarKey, setNewVarKey] = useState("");
   const [newVarVal, setNewVarVal] = useState("");
+  const [varKeyError, setVarKeyError] = useState("");
   const [isNewSecret, setIsNewSecret] = useState(true);
   const [revealedIds, setRevealedIds] = useState(new Set());
   const [unmaskedValues, setUnmaskedValues] = useState({});
 
-  // Domains state
+  // Domains
   const [domains, setDomains] = useState([
     { domain: "web-app.deployforge.app", status: "Active", isDefault: true },
   ]);
@@ -104,7 +138,7 @@ export default function SettingsPage() {
   const [notifyFailures, setNotifyFailures] = useState(true);
   const [notifyWeekly, setNotifyWeekly] = useState(false);
 
-  // 1. Load user profile, settings & projects
+  // 1. Load user profile, settings & projects on mount
   useEffect(() => {
     fetchSettings()
       .then((data) => {
@@ -112,6 +146,7 @@ export default function SettingsPage() {
           setDisplayName(data.user.user_name || "Developer");
           setEmail(data.user.email || "developer@deployforge.dev");
           setGithubConnected(Boolean(data.user.github_connected));
+          setGithubUsername(data.user.github_username || "");
           if (data.user.notification_preferences) {
             setNotifyFailures(Boolean(data.user.notification_preferences.notify_failures));
             setNotifyWeekly(Boolean(data.user.notification_preferences.notify_weekly));
@@ -133,7 +168,7 @@ export default function SettingsPage() {
       .catch((err) => console.warn("Failed to load projects:", err));
   }, []);
 
-  // 2. Load environment variables when selected project changes
+  // 2. Load environment variables when project changes
   useEffect(() => {
     if (!selectedProjectId) {
       setEnvVars([]);
@@ -156,47 +191,174 @@ export default function SettingsPage() {
       });
   }, [selectedProjectId]);
 
+  // Handle Profile Update with Password Verification & Constraints
   const handleUpdateProfile = async (e) => {
     e.preventDefault();
-    setProfileSaving(true);
     setProfileError("");
-    setSaveSuccess(false);
+    setProfileSuccess(false);
 
+    const cleanName = displayName.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Constraint: Name length and characters
+    if (cleanName.length < 2 || cleanName.length > 50) {
+      setProfileError("Full name / username must be between 2 and 50 characters long.");
+      return;
+    }
+    if (!USERNAME_REGEX.test(cleanName)) {
+      setProfileError("Username may only contain letters, numbers, spaces, hyphens, and underscores.");
+      return;
+    }
+
+    // Constraint: Email format
+    if (!EMAIL_REGEX.test(cleanEmail)) {
+      setProfileError("Please enter a valid email address (e.g. user@domain.com).");
+      return;
+    }
+
+    // Constraint: Password Verification Required
+    if (!profilePassword) {
+      setProfileError("Current password is required to verify your identity before saving profile changes.");
+      return;
+    }
+
+    setProfileSaving(true);
     try {
-      await updateProfile({ name: displayName, email });
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 2500);
+      await updateProfile({
+        name: cleanName,
+        email: cleanEmail,
+        current_password: profilePassword,
+      });
+      setProfileSuccess(true);
+      setProfilePassword("");
+      setTimeout(() => setProfileSuccess(false), 3000);
     } catch (err) {
-      setProfileError(err.message);
+      setProfileError(err.message || "Could not update profile. Please verify your current password.");
     } finally {
       setProfileSaving(false);
     }
   };
 
+  // Handle GitHub Profile Linking with Verification
+  const handleLinkGitHub = async (e) => {
+    e.preventDefault();
+    setGithubError("");
+    setGithubSuccess("");
+
+    if (!githubInput.trim()) {
+      setGithubError("Please enter a GitHub profile link or username.");
+      return;
+    }
+
+    // Validate format
+    const validation = validateGitHubProfile(githubInput);
+    if (!validation.valid) {
+      setGithubError(validation.error);
+      return;
+    }
+
+    setGithubLinking(true);
+    try {
+      // Verify with GitHub public API
+      const check = await verifyGitHubProfileExists(validation.username);
+      if (!check.exists) {
+        setGithubError(check.error || "GitHub account could not be found.");
+        setGithubLinking(false);
+        return;
+      }
+
+      // Persist to backend
+      await updateProfile({
+        github_connected: true,
+        github_username: validation.username,
+      });
+
+      setGithubConnected(true);
+      setGithubUsername(validation.username);
+      setGithubInput("");
+      setIsLinkingGithub(false);
+      setGithubSuccess(`GitHub profile @${validation.username} linked successfully!`);
+      setTimeout(() => setGithubSuccess(""), 4000);
+    } catch (err) {
+      setGithubError(err.message || "Failed to link GitHub profile.");
+    } finally {
+      setGithubLinking(false);
+    }
+  };
+
+  const handleDisconnectGitHub = async () => {
+    if (!window.confirm("Are you sure you want to disconnect your GitHub profile?")) {
+      return;
+    }
+    setGithubError("");
+    setGithubSuccess("");
+    try {
+      await updateProfile({
+        github_connected: false,
+        github_username: null,
+      });
+      setGithubConnected(false);
+      setGithubUsername("");
+      setGithubSuccess("GitHub profile disconnected.");
+      setTimeout(() => setGithubSuccess(""), 3000);
+    } catch (err) {
+      setGithubError(err.message || "Failed to disconnect GitHub profile.");
+    }
+  };
+
+  // Handle Password Update with Constraints
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
+    setPasswordError("");
+    setPasswordSuccess(false);
+
+    if (!currentPassword) {
+      setPasswordError("Please enter your current password.");
+      return;
+    }
+
     if (newPassword.length < 8) {
       setPasswordError("New password must be at least 8 characters long.");
       return;
     }
 
-    setPasswordLoading(true);
-    setPasswordError("");
-    setPasswordSuccess(false);
+    if (newPassword.length > 128) {
+      setPasswordError("New password cannot exceed 128 characters.");
+      return;
+    }
 
+    // Constraint: at least one letter and at least one number
+    if (!/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      setPasswordError("New password must contain at least one letter and at least one number.");
+      return;
+    }
+
+    if (newPassword === currentPassword) {
+      setPasswordError("New password must be different from your current password.");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordError("New password and confirmation do not match.");
+      return;
+    }
+
+    setPasswordLoading(true);
     try {
-      await updatePassword({ currentPassword, newPassword });
+      await updatePassword({ current_password: currentPassword, new_password: newPassword });
       setPasswordSuccess(true);
       setCurrentPassword("");
       setNewPassword("");
+      setConfirmPassword("");
       setTimeout(() => setPasswordSuccess(false), 3000);
     } catch (err) {
-      setPasswordError(err.message);
+      setPasswordError(err.message || "Failed to update password.");
     } finally {
       setPasswordLoading(false);
     }
   };
 
+  // Notification Preferences
   const handleToggleFailureAlerts = async (checked) => {
     setNotifyFailures(checked);
     try {
@@ -221,6 +383,7 @@ export default function SettingsPage() {
     }
   };
 
+  // Secret Masking & Unmasking
   const handleToggleSecret = async (id, key) => {
     const nextRevealed = new Set(revealedIds);
     if (nextRevealed.has(id)) {
@@ -263,15 +426,42 @@ export default function SettingsPage() {
     }
   };
 
+  // Add Variable with Constraints
   const handleAddVariable = async (e) => {
     e.preventDefault();
-    if (!newVarKey.trim() || !selectedProjectId) return;
+    setVarKeyError("");
 
-    const newKey = newVarKey.trim().toUpperCase();
+    if (!selectedProjectId) {
+      alert("Please select a project first.");
+      return;
+    }
+
+    const cleanKey = newVarKey.trim().toUpperCase();
+    if (!ENV_KEY_REGEX.test(cleanKey)) {
+      setVarKeyError("Key must start with a letter/underscore and contain only uppercase letters, numbers, and underscores (e.g., API_KEY).");
+      return;
+    }
+
+    if (cleanKey.length > 100) {
+      setVarKeyError("Variable key cannot exceed 100 characters.");
+      return;
+    }
+
+    if (newVarVal.length > 10000) {
+      alert("Variable value cannot exceed 10,000 characters.");
+      return;
+    }
+
+    // Check if key already exists
+    const exists = envVars.some((v) => v.key === cleanKey);
+    if (exists && !window.confirm(`Variable "${cleanKey}" already exists. Do you want to overwrite it?`)) {
+      return;
+    }
+
     const updated = [
-      ...envVars.filter((v) => v.key !== newKey),
+      ...envVars.filter((v) => v.key !== cleanKey),
       {
-        key: newKey,
+        key: cleanKey,
         value: newVarVal,
         isSecret: isNewSecret,
       },
@@ -288,16 +478,32 @@ export default function SettingsPage() {
     }
   };
 
+  // Bulk Import with Constraints
   const handleBulkImport = async (e) => {
     e.preventDefault();
-    if (!bulkImportText.trim() || !selectedProjectId) return;
-    const parsed = parseEnvString(bulkImportText);
-    if (parsed.length === 0) {
-      alert("No valid KEY=VALUE pairs found in pasted text.");
+    setBulkImportErrors([]);
+
+    if (!selectedProjectId) {
+      alert("Please select a project first.");
       return;
     }
 
-    // Merge parsed with existing
+    if (!bulkImportText.trim()) {
+      setBulkImportErrors(["Please paste at least one KEY=VALUE line."]);
+      return;
+    }
+
+    const { parsed, errors } = parseEnvString(bulkImportText);
+    if (errors.length > 0) {
+      setBulkImportErrors(errors);
+      return;
+    }
+
+    if (parsed.length === 0) {
+      setBulkImportErrors(["No valid KEY=VALUE pairs found."]);
+      return;
+    }
+
     const existingKeys = new Set(parsed.map((p) => p.key));
     const merged = [
       ...envVars.filter((v) => !existingKeys.has(v.key)),
@@ -314,7 +520,7 @@ export default function SettingsPage() {
         setIsBulkImporting(false);
       }, 1500);
     } catch (err) {
-      alert(`Bulk import failed: ${err.message}`);
+      setBulkImportErrors([err.message || "Bulk import failed."]);
     }
   };
 
@@ -329,7 +535,7 @@ export default function SettingsPage() {
   };
 
   const handleDeleteVariable = async (key, id) => {
-    if (!confirm(`Are you sure you want to delete variable ${key}?`)) return;
+    if (!window.confirm(`Are you sure you want to delete secret "${key}"?`)) return;
     try {
       await deleteEnvVar(selectedProjectId, key || id);
       setEnvVars((prev) => prev.filter((v) => v.key !== key && v.id !== id));
@@ -338,37 +544,51 @@ export default function SettingsPage() {
     }
   };
 
+  // Add Domain with Constraints
   const handleAddDomain = async (e) => {
     e.preventDefault();
-    if (!newDomain.trim()) return;
-
-    setDomainLoading(true);
     setDomainError("");
 
+    let cleanDomain = newDomain.trim().toLowerCase();
+    // Strip protocol and path if entered
+    cleanDomain = cleanDomain.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").trim();
+
+    if (!DOMAIN_REGEX.test(cleanDomain)) {
+      setDomainError("Please enter a valid domain name (e.g. app.yourdomain.com or mycompany.io). Protocol and paths must be omitted.");
+      return;
+    }
+
+    if (cleanDomain.length > 253) {
+      setDomainError("Domain name cannot exceed 253 characters.");
+      return;
+    }
+
+    if (cleanDomain.includes("localhost") || cleanDomain.startsWith("127.")) {
+      setDomainError("Localhost and loopback addresses cannot be registered as public custom domains.");
+      return;
+    }
+
+    setDomainLoading(true);
     try {
-      const added = await apiAddDomain(newDomain.trim(), selectedProjectId || null);
+      const added = await apiAddDomain(cleanDomain, selectedProjectId || null);
       setDomains((prev) => [...prev, added]);
       setNewDomain("");
       setIsAddingDomain(false);
     } catch (err) {
-      setDomainError(err.message);
+      setDomainError(err.message || "Failed to register custom domain.");
     } finally {
       setDomainLoading(false);
     }
   };
 
   const handleDeleteDomain = async (id, name) => {
-    if (!confirm(`Delete custom domain "${name}"?`)) return;
+    if (!window.confirm(`Delete custom domain "${name}"?`)) return;
     try {
       await apiDeleteDomain(id || name);
       setDomains((prev) => prev.filter((d) => d.id !== id && d.domain !== name));
     } catch (err) {
       alert(`Failed to delete domain: ${err.message}`);
     }
-  };
-
-  const handleToggleGithub = () => {
-    setGithubConnected(!githubConnected);
   };
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
@@ -386,31 +606,43 @@ export default function SettingsPage() {
       </div>
 
       <div className="settings-sections-list">
-        {/* Section 1: User Profile */}
+        {/* Section 1: User Profile & Identity */}
         <section className="settings-section-card" aria-label="Profile settings">
           <div className="settings-intro-col">
             <h2 className="section-col-title">Personal Profile</h2>
             <p className="section-col-desc">
-              Your name and primary notification email address within the DeployForge cluster.
+              Your name and primary notification email address. Password verification is required to authorize changes.
             </p>
           </div>
 
           <form onSubmit={handleUpdateProfile} className="settings-form-col">
             {profileError && (
-              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
-                {profileError}
+              <div className="auth-message-block error" style={{ marginBottom: "1rem" }}>
+                <CloseIcon size={13} />
+                <span>{profileError}</span>
+              </div>
+            )}
+
+            {profileSuccess && (
+              <div className="auth-message-block success" style={{ marginBottom: "1rem" }}>
+                <CheckIcon size={13} />
+                <span>Profile updated successfully.</span>
               </div>
             )}
 
             <div className="form-group-block">
-              <label htmlFor="display-name">Full name</label>
+              <label htmlFor="display-name">Full name / Username</label>
               <input
                 id="display-name"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 className="figma-text-input"
                 required
+                minLength={2}
+                maxLength={50}
+                placeholder="e.g. Jane Doe"
               />
+              <span className="field-constraint-hint">2-50 characters (letters, numbers, hyphens, and underscores)</span>
             </div>
 
             <div className="form-group-block">
@@ -422,38 +654,146 @@ export default function SettingsPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 className="figma-text-input"
                 required
+                placeholder="developer@deployforge.dev"
               />
+              <span className="field-constraint-hint">Used for deployment notifications and digest reports</span>
             </div>
 
-            <div className="connected-accounts-block">
+            {/* Password Verification to authorize username/email change */}
+            <div className="form-group-block" style={{ marginTop: "16px", padding: "14px", background: "#111114", border: "1px solid var(--border-default)", borderRadius: "var(--radius-xs)" }}>
+              <label htmlFor="verify-pass" style={{ color: "#ffffff", fontWeight: "600" }}>
+                Current password to authorize changes
+              </label>
+              <input
+                id="verify-pass"
+                type="password"
+                required
+                value={profilePassword}
+                onChange={(e) => setProfilePassword(e.target.value)}
+                className="figma-text-input"
+                placeholder="Enter current password to verify identity"
+                style={{ marginTop: "6px" }}
+              />
+              <span className="field-constraint-hint">Your password is required to confirm username or email modifications.</span>
+            </div>
+
+            {/* Connected Accounts: GitHub Profile Linking */}
+            <div className="connected-accounts-block" style={{ marginTop: "20px" }}>
               <h3 className="sub-section-title">Connected Accounts</h3>
-              <div className="account-row-item">
-                <div className="acct-brand">
-                  <GitHubIcon size={18} className="octo-svg" />
-                  <div>
-                    <strong className="acct-name">GitHub Integration</strong>
-                    <span className="sub-handle">Connected for automated continuous deployment</span>
+
+              {githubError && (
+                <div className="auth-message-block error" style={{ margin: "8px 0" }}>
+                  <CloseIcon size={12} />
+                  <span>{githubError}</span>
+                </div>
+              )}
+
+              {githubSuccess && (
+                <div className="auth-message-block success" style={{ margin: "8px 0" }}>
+                  <CheckIcon size={12} />
+                  <span>{githubSuccess}</span>
+                </div>
+              )}
+
+              {githubConnected ? (
+                <div className="github-connected-card">
+                  <div className="github-connected-info">
+                    <GitHubIcon size={20} className="text-green" />
+                    <div>
+                      <strong style={{ display: "block", fontSize: "13px", color: "#ffffff" }}>
+                        GitHub Profile Connected
+                      </strong>
+                      <a
+                        href={`https://github.com/${githubUsername}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="github-handle-link"
+                      >
+                        <span>@{githubUsername || "connected"}</span>
+                        <ExternalLinkIcon size={11} />
+                      </a>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span className="starter-badge ready">Linked</span>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-sm"
+                      onClick={handleDisconnectGitHub}
+                      title="Disconnect GitHub account"
+                    >
+                      Disconnect
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className={`btn-secondary btn-sm ${githubConnected ? "connected" : ""}`}
-                  onClick={handleToggleGithub}
-                >
-                  {githubConnected ? "Connected" : "Connect"}
-                </button>
-              </div>
+              ) : (
+                <div className="account-row-item" style={{ flexDirection: "column", alignItems: "stretch", gap: "10px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div className="acct-brand">
+                      <GitHubIcon size={18} className="octo-svg" />
+                      <div>
+                        <strong className="acct-name">GitHub Profile Linking</strong>
+                        <span className="sub-handle">Connect your GitHub profile for commit tracking and verified builds</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-sm"
+                      onClick={() => setIsLinkingGithub(!isLinkingGithub)}
+                    >
+                      {isLinkingGithub ? "Cancel" : "Link Profile"}
+                    </button>
+                  </div>
+
+                  {isLinkingGithub && (
+                    <div className="github-link-form">
+                      <div className="github-link-inputs">
+                        <input
+                          type="text"
+                          value={githubInput}
+                          onChange={(e) => {
+                            setGithubInput(e.target.value);
+                            if (githubError) setGithubError("");
+                          }}
+                          placeholder="https://github.com/username or @username"
+                          className="figma-text-input"
+                          style={githubError ? { borderColor: "#ef4444" } : {}}
+                        />
+                        <button
+                          type="button"
+                          className="btn-primary btn-sm"
+                          onClick={handleLinkGitHub}
+                          disabled={githubLinking}
+                        >
+                          {githubLinking ? (
+                            <>
+                              <SpinnerIcon size={12} className="spin" />
+                              <span>Verifying...</span>
+                            </>
+                          ) : (
+                            <span>Verify & Link</span>
+                          )}
+                        </button>
+                      </div>
+                      <span className="field-constraint-hint">
+                        Enter a valid public GitHub profile URL or your GitHub handle. Invalid links are strictly validated.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="save-action-row">
-              {saveSuccess && (
-                <span className="save-feedback-pill">
-                  <CheckIcon size={12} />
-                  <span>Profile updated</span>
-                </span>
-              )}
               <button type="submit" className="btn-primary" disabled={profileSaving}>
-                {profileSaving ? "Saving..." : "Save Changes"}
+                {profileSaving ? (
+                  <>
+                    <SpinnerIcon size={12} className="spin" />
+                    <span>Verifying & Saving...</span>
+                  </>
+                ) : (
+                  <span>Save Changes</span>
+                )}
               </button>
             </div>
           </form>
@@ -464,14 +804,22 @@ export default function SettingsPage() {
           <div className="settings-intro-col">
             <h2 className="section-col-title">Account Security</h2>
             <p className="section-col-desc">
-              Update your account password to keep your workspaces and deployments protected.
+              Update your account password with strict complexity requirements to keep your workspace protected.
             </p>
           </div>
 
           <form onSubmit={handleUpdatePassword} className="settings-form-col">
             {passwordError && (
-              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
-                {passwordError}
+              <div className="auth-message-block error" style={{ marginBottom: "1rem" }}>
+                <CloseIcon size={13} />
+                <span>{passwordError}</span>
+              </div>
+            )}
+
+            {passwordSuccess && (
+              <div className="auth-message-block success" style={{ marginBottom: "1rem" }}>
+                <CheckIcon size={13} />
+                <span>Password updated successfully.</span>
               </div>
             )}
 
@@ -481,7 +829,10 @@ export default function SettingsPage() {
                 id="current-pass"
                 type="password"
                 value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
+                onChange={(e) => {
+                  setCurrentPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
                 className="figma-text-input"
                 required
                 placeholder="••••••••••••"
@@ -489,28 +840,50 @@ export default function SettingsPage() {
             </div>
 
             <div className="form-group-block">
-              <label htmlFor="new-pass">New password (minimum 8 characters)</label>
+              <label htmlFor="new-pass">New password</label>
               <input
                 id="new-pass"
                 type="password"
                 value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
+                onChange={(e) => {
+                  setNewPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
                 className="figma-text-input"
                 required
                 minLength={8}
+                maxLength={128}
+                placeholder="••••••••••••"
+              />
+              <span className="field-constraint-hint">Must be at least 8 characters and include at least one letter and one number</span>
+            </div>
+
+            <div className="form-group-block">
+              <label htmlFor="confirm-pass">Confirm new password</label>
+              <input
+                id="confirm-pass"
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
+                className="figma-text-input"
+                required
                 placeholder="••••••••••••"
               />
             </div>
 
             <div className="save-action-row">
-              {passwordSuccess && (
-                <span className="save-feedback-pill">
-                  <CheckIcon size={12} />
-                  <span>Password updated successfully</span>
-                </span>
-              )}
               <button type="submit" className="btn-primary" disabled={passwordLoading}>
-                {passwordLoading ? "Updating..." : "Update Password"}
+                {passwordLoading ? (
+                  <>
+                    <SpinnerIcon size={12} className="spin" />
+                    <span>Updating Password...</span>
+                  </>
+                ) : (
+                  <span>Update Password</span>
+                )}
               </button>
             </div>
           </form>
@@ -564,7 +937,10 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
-                  onClick={() => setIsBulkImporting(!isBulkImporting)}
+                  onClick={() => {
+                    setIsBulkImporting(!isBulkImporting);
+                    setBulkImportErrors([]);
+                  }}
                 >
                   <span>{isBulkImporting ? "Close Bulk" : "Bulk Import"}</span>
                 </button>
@@ -572,7 +948,10 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
-                  onClick={() => setIsAddingVar(!isAddingVar)}
+                  onClick={() => {
+                    setIsAddingVar(!isAddingVar);
+                    setVarKeyError("");
+                  }}
                 >
                   <PlusIcon size={12} />
                   <span>{isAddingVar ? "Close" : "Add Secret"}</span>
@@ -580,16 +959,28 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            {/* Bulk Import Drawer */}
+            {/* Bulk Import Drawer with Strict Constraints */}
             {isBulkImporting && (
               <form onSubmit={handleBulkImport} className="add-variable-drawer" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 <span style={{ fontSize: "12px", color: "var(--text-secondary)", fontWeight: "600" }}>
-                  Paste .env variables (one per line)
+                  Paste .env variables (one KEY=VALUE per line)
                 </span>
+                {bulkImportErrors.length > 0 && (
+                  <div className="auth-message-block error">
+                    <ul style={{ margin: 0, paddingLeft: "16px", fontSize: "12px" }}>
+                      {bulkImportErrors.map((err, i) => (
+                        <li key={i}>{err}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <textarea
                   className="env-bulk-textarea"
                   value={bulkImportText}
-                  onChange={(e) => setBulkImportText(e.target.value)}
+                  onChange={(e) => {
+                    setBulkImportText(e.target.value);
+                    if (bulkImportErrors.length > 0) setBulkImportErrors([]);
+                  }}
                   placeholder="DATABASE_URL=postgres://user:pass@host:5432/app&#10;JWT_SECRET=sk_live_987654321&#10;CACHE_TTL=3600"
                   required
                 />
@@ -600,7 +991,10 @@ export default function SettingsPage() {
                   <button
                     type="button"
                     className="btn-secondary btn-sm"
-                    onClick={() => setIsBulkImporting(false)}
+                    onClick={() => {
+                      setIsBulkImporting(false);
+                      setBulkImportErrors([]);
+                    }}
                   >
                     Cancel
                   </button>
@@ -614,44 +1008,59 @@ export default function SettingsPage() {
               </form>
             )}
 
-            {/* Single Var Add Drawer */}
+            {/* Single Var Add Drawer with Key Constraints */}
             {isAddingVar && (
-              <form onSubmit={handleAddVariable} className="add-variable-drawer">
-                <input
-                  required
-                  placeholder="KEY (e.g. DATABASE_URL)"
-                  value={newVarKey}
-                  onChange={(e) => setNewVarKey(e.target.value)}
-                  className="add-var-key"
-                />
-                <input
-                  required
-                  placeholder="VALUE"
-                  value={newVarVal}
-                  onChange={(e) => setNewVarVal(e.target.value)}
-                  className="add-var-val"
-                />
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <label style={{ fontSize: "12px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "4px" }}>
+              <form onSubmit={handleAddVariable} className="add-variable-drawer" style={{ flexDirection: "column", gap: "10px" }}>
+                {varKeyError && (
+                  <span className="field-error-text">
+                    <CloseIcon size={11} />
+                    <span>{varKeyError}</span>
+                  </span>
+                )}
+                <div style={{ display: "flex", gap: "12px" }}>
+                  <input
+                    required
+                    placeholder="KEY (e.g. DATABASE_URL)"
+                    value={newVarKey}
+                    onChange={(e) => {
+                      setNewVarKey(e.target.value.toUpperCase());
+                      if (varKeyError) setVarKeyError("");
+                    }}
+                    className="add-var-key"
+                    style={varKeyError ? { borderColor: "#ef4444" } : {}}
+                  />
+                  <input
+                    required
+                    placeholder="VALUE"
+                    value={newVarVal}
+                    onChange={(e) => setNewVarVal(e.target.value)}
+                    className="add-var-val"
+                  />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <label style={{ fontSize: "12px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "6px" }}>
                     <input
                       type="checkbox"
                       checked={isNewSecret}
                       onChange={(e) => setIsNewSecret(e.target.checked)}
                     />
-                    <span>Encrypt as secret</span>
+                    <span>Encrypt as secret in vault</span>
                   </label>
-                </div>
-                <div className="add-var-btns">
-                  <button type="submit" className="btn-primary btn-sm">
-                    Save to Vault
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary btn-sm"
-                    onClick={() => setIsAddingVar(false)}
-                  >
-                    Cancel
-                  </button>
+                  <div className="add-var-btns">
+                    <button type="submit" className="btn-primary btn-sm">
+                      Save to Vault
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-sm"
+                      onClick={() => {
+                        setIsAddingVar(false);
+                        setVarKeyError("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </form>
             )}
@@ -734,8 +1143,9 @@ export default function SettingsPage() {
 
           <div className="settings-form-col">
             {domainError && (
-              <div style={{ color: "#ef4444", fontSize: "13px", marginBottom: "0.75rem" }}>
-                {domainError}
+              <div className="auth-message-block error" style={{ marginBottom: "0.75rem" }}>
+                <CloseIcon size={13} />
+                <span>{domainError}</span>
               </div>
             )}
 
@@ -781,12 +1191,23 @@ export default function SettingsPage() {
                   required
                   placeholder="app.yourdomain.com"
                   value={newDomain}
-                  onChange={(e) => setNewDomain(e.target.value)}
+                  onChange={(e) => {
+                    setNewDomain(e.target.value);
+                    if (domainError) setDomainError("");
+                  }}
                   className="figma-text-input"
+                  style={domainError ? { borderColor: "#ef4444" } : {}}
                 />
                 <div className="add-domain-btns">
                   <button type="submit" className="btn-primary btn-sm" disabled={domainLoading}>
-                    {domainLoading ? "Adding..." : "Add CNAME"}
+                    {domainLoading ? (
+                      <>
+                        <SpinnerIcon size={12} className="spin" />
+                        <span>Validating...</span>
+                      </>
+                    ) : (
+                      <span>Add CNAME</span>
+                    )}
                   </button>
                   <button
                     type="button"
@@ -804,7 +1225,10 @@ export default function SettingsPage() {
               <button
                 type="button"
                 className="btn-secondary btn-sm add-domain-btn"
-                onClick={() => setIsAddingDomain(true)}
+                onClick={() => {
+                  setIsAddingDomain(true);
+                  setDomainError("");
+                }}
               >
                 <PlusIcon size={13} />
                 <span>Add Domain</span>
