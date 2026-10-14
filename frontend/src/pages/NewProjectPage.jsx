@@ -46,16 +46,36 @@ function serializeEnvVars(vars) {
   return vars.map((v) => `${v.key}=${v.value}`).join("\n");
 }
 
-function validateGitHubRepoUrl(url) {
-  if (!url || typeof url !== "string" || !url.trim()) {
+function extractGitHubRepoMetadata(url) {
+  if (!url || typeof url !== "string") {
     return { valid: false, error: "GitHub repository URL is required." };
   }
-  const trimmed = url.trim();
-  const httpsRegex = /^https?:\/\/github\.com\/([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+)(?:\.git)?\/?$/i;
-  const sshRegex = /^git@github\.com:([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+)(?:\.git)?\/?$/i;
+  let clean = url.trim();
+  if (!clean) {
+    return { valid: false, error: "GitHub repository URL is required." };
+  }
 
-  if (!httpsRegex.test(trimmed) && !sshRegex.test(trimmed)) {
-    if (!trimmed.toLowerCase().includes("github.com")) {
+  // Handle SSH format git@github.com:owner/repo.git
+  if (clean.startsWith("git@github.com:")) {
+    clean = clean.replace("git@github.com:", "https://github.com/");
+  } else if (!/^https?:\/\//i.test(clean) && clean.startsWith("github.com")) {
+    clean = `https://${clean}`;
+  }
+
+  // Detect and extract branch from /tree/branch-name URLs if present
+  let detectedBranch = null;
+  const treeMatch = clean.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/?#]+)/i);
+  if (treeMatch) {
+    detectedBranch = treeMatch[3];
+    clean = `https://github.com/${treeMatch[1]}/${treeMatch[2]}`;
+  }
+
+  // Strip query parameters, hashes, trailing slashes, and .git
+  clean = clean.split(/[?#]/)[0].replace(/\/+$/, "").replace(/\.git$/i, "");
+
+  const match = clean.match(/^https?:\/\/github\.com\/([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+)$/i);
+  if (!match) {
+    if (!clean.toLowerCase().includes("github.com")) {
       return {
         valid: false,
         error: "Invalid repository provider. Only GitHub repositories (https://github.com/owner/repository) are supported.",
@@ -66,13 +86,29 @@ function validateGitHubRepoUrl(url) {
       error: "Invalid GitHub repository link format. Must be in the format: https://github.com/organization/repository",
     };
   }
-  return { valid: true };
+
+  const owner = match[1];
+  const repo = match[2];
+  const sanitizedProjectName = repo
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return {
+    valid: true,
+    owner,
+    repo,
+    projectName: sanitizedProjectName || "my-app",
+    branch: detectedBranch,
+    normalizedUrl: clean,
+  };
 }
 
 export default function NewProjectPage({ navigate, searchParams }) {
   const [repoUrl, setRepoUrl] = useState("https://github.com/acme/web-app");
   const [repoUrlError, setRepoUrlError] = useState("");
   const [projectName, setProjectName] = useState("web-app");
+  const [isCustomName, setIsCustomName] = useState(false);
   const [nameError, setNameError] = useState("");
   const [branch, setBranch] = useState("main");
   const [selectedRuntime, setSelectedRuntime] = useState("docker");
@@ -82,7 +118,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(null);
 
   // Env vars state
   const [envMode, setEnvMode] = useState("form"); // "form" | "bulk"
@@ -138,7 +174,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
     e.preventDefault();
 
     // Validate GitHub Repo URL
-    const repoValidation = validateGitHubRepoUrl(repoUrl);
+    const repoValidation = extractGitHubRepoMetadata(repoUrl);
     if (!repoValidation.valid) {
       setRepoUrlError(repoValidation.error);
       setErrorMessage(repoValidation.error);
@@ -171,8 +207,8 @@ export default function NewProjectPage({ navigate, searchParams }) {
     try {
       await createProject({
         name: cleanName,
-        repository_url: repoUrl.trim(),
-        branch: branch.trim() || "main",
+        repository_url: repoValidation.normalizedUrl || repoUrl.trim(),
+        branch: branch.trim() || repoValidation.branch || "main",
         runtime: selectedRuntime,
         port: parsedPort,
         auto_deploy: autoDeploy,
@@ -188,13 +224,53 @@ export default function NewProjectPage({ navigate, searchParams }) {
     }
   };
 
-  const cleanSlug = projectName.trim().toLowerCase().replace(/[^a-z0-9-]/g, "") || "my-app";
-  const publicUrl = `https://${cleanSlug}.deployforge.app`;
+  const handleRepoUrlChange = (val) => {
+    setRepoUrl(val);
+    if (repoUrlError) setRepoUrlError("");
+    const meta = extractGitHubRepoMetadata(val);
+    if (meta.valid) {
+      if (!isCustomName || projectName === "web-app") {
+        setProjectName(meta.projectName);
+        if (nameError) setNameError("");
+      }
+      if (meta.branch) {
+        setBranch(meta.branch);
+      }
+    }
+  };
 
-  const handleCopyUrl = () => {
-    navigator.clipboard?.writeText(publicUrl);
-    setCopiedUrl(true);
-    setTimeout(() => setCopiedUrl(false), 1800);
+  const handleRepoUrlBlur = () => {
+    if (repoUrl.trim()) {
+      const meta = extractGitHubRepoMetadata(repoUrl);
+      if (!meta.valid) {
+        setRepoUrlError(meta.error);
+      } else {
+        setRepoUrlError("");
+        if (!isCustomName || projectName === "web-app") {
+          setProjectName(meta.projectName);
+        }
+        if (meta.branch) {
+          setBranch(meta.branch);
+        }
+      }
+    }
+  };
+
+  const handleProjectNameChange = (val) => {
+    setProjectName(val);
+    setIsCustomName(true);
+    if (nameError) setNameError("");
+  };
+
+  const cleanSlug = projectName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "my-app";
+  const publicUrl = `https://${cleanSlug}.deployforge.app`;
+  const localUrl = `http://${cleanSlug}.localhost`;
+  const nipIoUrl = `http://${cleanSlug}.127.0.0.1.nip.io`;
+
+  const handleCopyUrl = (urlToCopy, type = "prod") => {
+    navigator.clipboard?.writeText(urlToCopy);
+    setCopiedUrl(type);
+    setTimeout(() => setCopiedUrl(null), 1800);
   };
 
   return (
@@ -247,23 +323,10 @@ export default function NewProjectPage({ navigate, searchParams }) {
                 <input
                   id="repo-url"
                   required
-                  type="url"
+                  type="text"
                   value={repoUrl}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setRepoUrl(val);
-                    if (repoUrlError) {
-                      const v = validateGitHubRepoUrl(val);
-                      if (v.valid) setRepoUrlError("");
-                    }
-                  }}
-                  onBlur={() => {
-                    if (repoUrl) {
-                      const v = validateGitHubRepoUrl(repoUrl);
-                      if (!v.valid) setRepoUrlError(v.error);
-                      else setRepoUrlError("");
-                    }
-                  }}
+                  onChange={(e) => handleRepoUrlChange(e.target.value)}
+                  onBlur={handleRepoUrlBlur}
                   placeholder="https://github.com/organization/repository"
                   style={repoUrlError ? { borderColor: "#ef4444" } : {}}
                 />
@@ -286,10 +349,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
                   id="project-name"
                   required
                   value={projectName}
-                  onChange={(e) => {
-                    setProjectName(e.target.value);
-                    if (nameError) setNameError("");
-                  }}
+                  onChange={(e) => handleProjectNameChange(e.target.value)}
                   placeholder="my-app"
                   style={nameError ? { borderColor: "#ef4444" } : {}}
                 />
@@ -501,18 +561,53 @@ export default function NewProjectPage({ navigate, searchParams }) {
             </div>
 
             {/* Live Domain Preview Box */}
-            <div className="domain-preview-box">
-              <span className="preview-label">Public Ingress Route:</span>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <strong className="preview-url">{publicUrl}</strong>
+            <div className="domain-preview-box" style={{ marginTop: "1.25rem", padding: "1rem", borderRadius: "var(--radius-md)", background: "rgba(255, 255, 255, 0.02)", border: "1px solid var(--border-subtle)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                <span className="preview-label" style={{ fontWeight: 600, color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
+                  Public Ingress Route:
+                </span>
+                <span className="starter-badge ready" style={{ fontSize: "0.65rem", padding: "1px 6px" }}>
+                  Active On Deploy
+                </span>
+              </div>
+
+              {/* Primary Vanity Domain */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", background: "rgba(0, 0, 0, 0.35)", padding: "8px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", marginBottom: "6px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+                  <span className="status-indicator status-dot green-pulse" style={{ width: "6px", height: "6px", flexShrink: 0 }} />
+                  <strong className="preview-url" style={{ color: "var(--accent-emerald, #10b981)", fontFamily: "var(--font-mono)", fontSize: "0.8125rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {publicUrl}
+                  </strong>
+                </div>
                 <button
                   type="button"
                   className="commit-hash-pill"
-                  onClick={handleCopyUrl}
-                  title="Copy preview URL"
+                  onClick={() => handleCopyUrl(publicUrl, "prod")}
+                  title="Copy public URL"
+                  style={{ flexShrink: 0 }}
                 >
                   <CopyIcon size={11} />
-                  <span>{copiedUrl ? "Copied" : "Copy"}</span>
+                  <span>{copiedUrl === "prod" ? "Copied" : "Copy"}</span>
+                </button>
+              </div>
+
+              {/* Local Development Host Route */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", background: "rgba(255, 255, 255, 0.015)", padding: "6px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.75rem", color: "var(--text-secondary)", overflow: "hidden" }}>
+                  <span style={{ color: "var(--text-tertiary)", flexShrink: 0 }}>Local:</span>
+                  <code style={{ color: "var(--text-primary)", fontSize: "0.75rem" }}>{localUrl}</code>
+                  <span style={{ color: "var(--text-tertiary)" }}>·</span>
+                  <code style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{nipIoUrl}</code>
+                </div>
+                <button
+                  type="button"
+                  className="commit-hash-pill"
+                  onClick={() => handleCopyUrl(localUrl, "local")}
+                  title="Copy local ingress URL"
+                  style={{ flexShrink: 0 }}
+                >
+                  <CopyIcon size={10} />
+                  <span>{copiedUrl === "local" ? "Copied" : "Copy"}</span>
                 </button>
               </div>
             </div>

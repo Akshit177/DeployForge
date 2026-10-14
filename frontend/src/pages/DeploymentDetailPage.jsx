@@ -252,8 +252,10 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
   const paramProjectName = searchParams?.get("project_name") || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("project_name") : null);
   const displayNum = deployment?.display_id || (deployment?.num ? `#${deployment.num}` : "#1");
   const projectName = deployment?.projectName || deployment?.project || paramProjectName || "web-app";
+  const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
   const projectDomain = deployment?.url || `${projectName}.deployforge.app`;
-  const domainHref = projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`;
+  const localDomain = `${projectName.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app"}.localhost`;
+  const domainHref = isLocalHost ? `http://${localDomain}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`);
   const branchName = deployment?.branch || "main";
   const commitSha = deployment?.commit || deployment?.commit_hash?.slice(0, 7) || "HEAD";
   const containerId = deployment?.container_id || (isRunning ? `df-${deployment?.id?.slice(0, 12)}` : null);
@@ -516,8 +518,8 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               <dt>Runtime</dt>
               <dd>
                 <span className="context-runtime-tag">
-                  {renderRuntimeIcon(deployment?.runtime || "node")}
-                  <span>{deployment?.runtime === "python" ? "Python 3.12" : deployment?.runtime === "static" ? "Static Nginx" : "Node.js 20"}</span>
+                  {renderRuntimeIcon(deployment?.runtime || "docker")}
+                  <span>{deployment?.runtime === "docker" || !deployment?.runtime ? "Docker Engine (OCI)" : deployment?.runtime === "python" ? "Python 3.12" : deployment?.runtime === "static" ? "Static Nginx" : "Node.js 20"}</span>
                 </span>
               </dd>
             </div>
@@ -527,7 +529,16 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
             </div>
             <div className="context-item">
               <dt>Ingress Domain</dt>
-              <dd><code>{projectDomain}</code></dd>
+              <dd style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                <a href={domainHref} target="_blank" rel="noreferrer" style={{ color: "var(--accent-emerald, #10b981)", textDecoration: "none", fontWeight: 500 }}>
+                  <code>{projectDomain}</code>
+                </a>
+                {isLocalHost && (
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-tertiary)" }}>
+                    Local: <a href={`http://${localDomain}`} target="_blank" rel="noreferrer" style={{ color: "var(--text-secondary)" }}>{localDomain}</a>
+                  </span>
+                )}
+              </dd>
             </div>
           </dl>
 

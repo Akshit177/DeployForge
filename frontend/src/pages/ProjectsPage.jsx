@@ -357,8 +357,10 @@ export default function ProjectsPage({ navigate }) {
             const isDeleting = deletingId === p.id;
             const isRedeploying = redeployingId === p.id;
             const stageProgress = getStageProgress(state);
+            const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
             const rawDomain = p.url || p.domain || `${p.name}.deployforge.app`;
-            const domainHref = rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`;
+            const localDomain = `${p.name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app"}.localhost`;
+            const domainHref = isLocalHost ? `http://${localDomain}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`);
 
             return (
               <article
