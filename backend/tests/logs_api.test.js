@@ -221,6 +221,34 @@ async function runTestSuite() {
       "User B cannot view User A's logs (tenant isolation enforced)"
     );
 
+    // User B cannot forge logs into User A's deployment
+    const userBForge = await fetch(`${baseUrl}/api/logs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: tokenCookieB },
+      body: JSON.stringify({
+        deployment_id: deploymentId,
+        message: "ILLEGAL_FORGED_LOG",
+      }),
+    });
+    assert(userBForge.status === 404, "User B cannot forge logs into User A's deployment (404)");
+
+    // User B cannot eavesdrop on User A's log stream
+    const userBStreamDep = await fetch(`${baseUrl}/api/logs/stream?deployment_id=${deploymentId}`, {
+      headers: { Cookie: tokenCookieB },
+    });
+    assert(userBStreamDep.status === 404, "User B cannot stream User A's deployment logs (404)");
+
+    const userBStreamProj = await fetch(`${baseUrl}/api/logs/stream?project_id=${projectId}`, {
+      headers: { Cookie: tokenCookieB },
+    });
+    assert(userBStreamProj.status === 404, "User B cannot stream User A's project logs (404)");
+
+    // User B cannot access User A's live hot state
+    const userBLive = await fetch(`${baseUrl}/api/deployments/${deploymentId}/live`, {
+      headers: { Cookie: tokenCookieB },
+    });
+    assert(userBLive.status === 404, "User B cannot query User A's live hot state (404)");
+
     console.log("==================================================");
     console.log(`  All Logs & SSE Engine tests passed! (${passed}/${passed})`);
     console.log("==================================================");

@@ -52,4 +52,39 @@ async function authenticateToken(req, res, next) {
     }
 }
 
-module.exports = { authenticateToken };
+async function assertOwnsDeployment(userId, deploymentId) {
+    if (!userId || !deploymentId) return null;
+    try {
+        const res = await pool.query(
+            `SELECT d.*, p.name AS project_name, p.domain AS project_domain
+             FROM deployments d
+             JOIN projects p ON d.project_id = p.id
+             WHERE d.id = $1 AND d.user_id = $2`,
+            [deploymentId, userId]
+        );
+        return res.rows.length > 0 ? res.rows[0] : null;
+    } catch (err) {
+        console.error("assertOwnsDeployment error:", err);
+        return null;
+    }
+}
+
+async function assertOwnsProject(userId, projectId) {
+    if (!userId || !projectId) return null;
+    try {
+        const res = await pool.query(
+            `SELECT * FROM projects WHERE id = $1 AND user_id = $2`,
+            [projectId, userId]
+        );
+        return res.rows.length > 0 ? res.rows[0] : null;
+    } catch (err) {
+        console.error("assertOwnsProject error:", err);
+        return null;
+    }
+}
+
+module.exports = {
+    authenticateToken,
+    assertOwnsDeployment,
+    assertOwnsProject,
+};

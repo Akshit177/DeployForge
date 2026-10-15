@@ -1,6 +1,6 @@
 const express = require("express");
 const pool = require("../config/db.js");
-const { authenticateToken } = require("../middleware/auth.js");
+const { authenticateToken, assertOwnsDeployment, assertOwnsProject } = require("../middleware/auth.js");
 const { verifyAccessToken } = require("../services/auth.js");
 const {
   emitDeploymentLog,
@@ -28,6 +28,7 @@ function formatLogEntry(l) {
     id: l.id,
     deployment_id: l.deployment_id,
     project_id: l.project_id,
+    user_id: l.user_id,
     level: level,
     source: l.source || "build",
     text: l.message || "",
@@ -130,6 +131,25 @@ router.get("/stream", authenticateSseOrCookie, async (req, res) => {
     return res.status(400).json({ message: "Invalid project_id format." });
   }
 
+  if (!deployment_id && !project_id) {
+    return res.status(400).json({ message: "Either deployment_id or project_id query parameter is required." });
+  }
+
+  // Verify ownership before opening SSE stream
+  if (deployment_id) {
+    const dep = await assertOwnsDeployment(req.user.id, deployment_id);
+    if (!dep) {
+      return res.status(404).json({ message: "Deployment not found." });
+    }
+  }
+
+  if (project_id) {
+    const proj = await assertOwnsProject(req.user.id, project_id);
+    if (!proj) {
+      return res.status(404).json({ message: "Project not found." });
+    }
+  }
+
   // Set SSE Headers
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -162,9 +182,8 @@ router.get("/stream", authenticateSseOrCookie, async (req, res) => {
     console.warn("Could not fetch initial stream logs:", initErr.message);
   }
 
-  // Listener for live logs
+  // Listener for live logs with strict tenant isolation
   const logListener = (logEntry) => {
-    // Verify tenant ownership
     if (logEntry.user_id && logEntry.user_id !== req.user.id) {
       return;
     }
@@ -176,9 +195,6 @@ router.get("/stream", authenticateSseOrCookie, async (req, res) => {
     unsubscribe = subscribeToDeploymentLogs(deployment_id, logListener);
   } else if (project_id) {
     unsubscribe = subscribeToProjectLogs(project_id, logListener);
-  } else {
-    // If no specific deployment or project specified, subscribe to user's general activity
-    unsubscribe = subscribeToProjectLogs("all", logListener);
   }
 
   // Send heartbeat ping every 15 seconds to prevent idle socket closing
@@ -211,7 +227,6 @@ router.post("/", authenticateSseOrCookie, async (req, res) => {
     for (const entry of entries) {
       const {
         deployment_id,
-        project_id,
         level = "INFO",
         source = "build",
         message,
@@ -227,17 +242,13 @@ router.post("/", authenticateSseOrCookie, async (req, res) => {
         continue;
       }
 
-      // Verify deployment and determine project_id
-      const depRes = await pool.query(
-        `SELECT project_id, user_id FROM deployments WHERE id = $1`,
-        [deployment_id]
-      );
-      if (depRes.rows.length === 0) {
+      // Verify caller owns the deployment
+      const dep = await assertOwnsDeployment(req.user.id, deployment_id);
+      if (!dep) {
         continue;
       }
 
-      const dep = depRes.rows[0];
-      const pId = project_id || dep.project_id;
+      const pId = dep.project_id;
       const normalizedLevel = ALLOWED_LEVELS.includes(String(level).toUpperCase())
         ? String(level).toUpperCase()
         : "INFO";
@@ -255,6 +266,10 @@ router.post("/", authenticateSseOrCookie, async (req, res) => {
 
       // Emit live event to subscribers
       emitDeploymentLog(deployment_id, formatted);
+    }
+
+    if (insertedLogs.length === 0) {
+      return res.status(404).json({ message: "Deployment not found or unauthorized." });
     }
 
     return res.status(201).json({

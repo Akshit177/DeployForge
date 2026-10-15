@@ -42,3 +42,24 @@
 - **Verification result:** VERIFIED — Reproduction script confirmed 401 on anonymous access and absence of leaked config; full test suite passed.
 - **Anything deferred:** None.
 
+### S-03: Cross-tenant log forging, live-log eavesdropping, hot-state IDOR
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented shared ownership assertion helpers `assertOwnsDeployment(userId, deploymentId)` and `assertOwnsProject(userId, projectId)` in `backend/middleware/auth.js`.
+  - Enforced ownership check before accessing Redis hot state in `GET /api/deployments/:id/live` in `backend/routes/deployments.js`.
+  - Enforced deployment ownership validation in `POST /api/logs`, strictly ignoring client-supplied `project_id` and using the database-verified `project_id`.
+  - Added deployment and project ownership validation to `GET /api/logs/stream` before opening SSE stream, and dropped the unauthenticated/unfiltered `"all"` stream subscription.
+  - Added `user_id` to `formatLogEntry` and `recordWorkerLog` / `emitDeploymentLog` payloads in `backend/services/logEmitter.js` and `backend/routes/logs.js` to ensure the SSE listener filter enforces tenant isolation.
+- **Files touched:**
+  - `backend/middleware/auth.js`
+  - `backend/routes/deployments.js`
+  - `backend/routes/logs.js`
+  - `backend/services/logEmitter.js`
+  - `backend/tests/logs_api.test.js`
+- **Tests added / updated:**
+  - `backend/tests/logs_api.test.js`: Added tests asserting cross-tenant log forging returns 404, cross-tenant deployment and project SSE stream connections return 404, and cross-tenant live hot state queries return 404.
+- **Verification result:** VERIFIED — Reproduction script confirmed 404 across forge, live hot-state, and stream checks; full test suite passed.
+- **Anything deferred:** None.
+
+

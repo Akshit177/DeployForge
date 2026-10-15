@@ -1,6 +1,6 @@
 const express = require("express");
 const pool = require("../config/db.js");
-const { authenticateToken } = require("../middleware/auth.js");
+const { authenticateToken, assertOwnsDeployment } = require("../middleware/auth.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
@@ -272,6 +272,12 @@ router.get("/:id/live", async (req, res) => {
   }
 
   try {
+    // Check ownership first before accessing cache or returning state
+    const deployment = await assertOwnsDeployment(req.user.id, id);
+    if (!deployment) {
+      return res.status(404).json({ message: "Deployment not found." });
+    }
+
     const hotState = await getDeploymentHotState(id);
     if (hotState) {
       return res.status(200).json({
@@ -280,21 +286,9 @@ router.get("/:id/live", async (req, res) => {
       });
     }
 
-    // Fallback to PostgreSQL durable record if hot state has expired
-    const result = await pool.query(
-      `SELECT d.*, p.name AS project_name, p.domain AS project_domain
-       FROM deployments d JOIN projects p ON d.project_id = p.id
-       WHERE d.id = $1 AND d.user_id = $2`,
-      [id, req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: "Deployment not found." });
-    }
-
     return res.status(200).json({
       live: false,
-      deployment: formatDeployment(result.rows[0]),
+      deployment: formatDeployment(deployment),
     });
   } catch (error) {
     console.error("Failed to fetch live deployment state:", error);

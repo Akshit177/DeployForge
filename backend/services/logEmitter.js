@@ -32,6 +32,7 @@ async function recordWorkerLog(deploymentId, projectId, userId, level, source, m
       id: row.id,
       deployment_id: row.deployment_id,
       project_id: row.project_id,
+      user_id: row.user_id,
       level: row.level,
       source: row.source,
       text: row.message,
