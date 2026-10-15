@@ -124,9 +124,20 @@ function generateNginxConfig() {
     return config;
   }
 
+  const includeDevDomains =
+    process.env.DEV_DOMAINS === "true" ||
+    (process.env.NODE_ENV !== "production" && process.env.DEV_DOMAINS !== "false");
+
   for (const route of routes) {
     const safeProjectSlug = route.project_name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
     const safeUpstreamName = `upstream_${route.project_name.toLowerCase().replace(/[^a-z0-9_]/g, "_")}_${route.port}`;
+
+    let serverNames = `    server_name ${route.domain};\n`;
+    if (includeDevDomains) {
+      serverNames += `    server_name ${safeProjectSlug}.localhost;\n`;
+      serverNames += `    server_name ${safeProjectSlug}.127.0.0.1.nip.io;\n`;
+    }
+
     config += `upstream ${safeUpstreamName} {
     server ${route.target_host}:${route.port} max_fails=3 fail_timeout=10s;
     keepalive 32;
@@ -135,15 +146,12 @@ function generateNginxConfig() {
 server {
     listen 80;
     listen [::]:80;
-    server_name ${route.domain};
-    server_name ${safeProjectSlug}.localhost;
-    server_name ${safeProjectSlug}.127.0.0.1.nip.io;
-
+${serverNames}
     location / {
         proxy_pass http://${safeUpstreamName};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
+        proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
         proxy_set_header X-Real-IP $remote_addr;

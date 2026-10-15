@@ -223,5 +223,33 @@
 - **Verification result:** VERIFIED — Local execution of CI pipeline steps succeeds with 100% pass; working tree remains clean after test runs.
 - **Anything deferred:** Full multi-platform matrix and GitHub Actions runner execution (Phase 1 / T-04).
 
+## Phase 1: Operational Baseline & Core Engine
+
+### R-01: Nginx config manager hardening and debouncing
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented single-flight debounced writer for `syncNginxConfig` in `backend/services/nginxManager.js` coalescing bursts into one write+reload per 150-200 ms window (`DEBOUNCE_MS`), with trailing execution for concurrent calls occurring mid-flight.
+  - Implemented atomic write using unique temporary files (`${UPSTREAMS_CONF_FILE}.tmp.${Date.now()}.${Math.random()}`), syntax validation, and POSIX rename over `UPSTREAMS_CONF_FILE` so existing configuration is preserved on failure without leaving stray `.tmp` files.
+  - Exported `getSyncStats()` and `resetSyncStats()` tracking `totalSyncCalls`, `actualWriteCount`, and `actualReloadCount`.
+  - Added `map $http_upgrade $connection_upgrade` block to `nginx/nginx.conf` and `ensureNginxStructure()` base config template.
+  - Replaced hardcoded `proxy_set_header Connection 'upgrade';` with `proxy_set_header Connection $connection_upgrade;` across `generateNginxConfig()` in `backend/services/proxyRouter.js`, `deployforge-ingress.conf`, and `ensureNginxStructure()`.
+  - Placed development hostnames (`.localhost` and `.nip.io`) behind conditional `includeDevDomains` check (`DEV_DOMAINS=true` or non-production environment without `DEV_DOMAINS=false`).
+  - Added dedicated unit test suite `backend/tests/nginx_manager.test.js` validating debounced burst coalescing (50 concurrent calls -> <= 3 actual writes/reloads), atomic temp rename cleanliness, dev domains gating, and WebSocket connection upgrade headers.
+  - Wired `node --test tests/nginx_manager.test.js` into `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `backend/services/proxyRouter.js`
+  - `backend/services/nginxManager.js`
+  - `backend/package.json`
+  - `backend/tests/nginx_manager.test.js`
+  - `nginx/nginx.conf`
+  - `nginx/conf.d/deployforge-ingress.conf`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/nginx_manager.test.js`: 4 tests (debounced burst coalescing with 50 concurrent calls, atomic file rename leaving no stray `.tmp` files, conditional dev domain inclusion, and WebSocket upgrade header mapping).
+- **Verification result:** VERIFIED — 50 parallel `syncNginxConfig()` calls coalesced to 1 actual write/reload with all 50 resolving `{ synced: true }`; full test suite (18 backend test files, 28 C++ worker tests, frontend build) all pass with 100% success; git status clean of runtime test debris.
+- **Anything deferred:** None.
+
+
 
 
