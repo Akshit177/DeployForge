@@ -253,25 +253,30 @@ async function runEndToEndPlatformVerification() {
       body: JSON.stringify({ email: userEmail, password: "RotatedPassword456!" }),
     });
     assert(newLoginRes.status === 200, "Signed in successfully using newly rotated password (200 OK)");
+    const newCookie = newLoginRes.headers.get("set-cookie").split(";")[0];
 
     // -------------------------------------------------------------------------
     // Phase 7: Health Check & Reverse Proxy Routing Engine
     // -------------------------------------------------------------------------
     console.log("\n[Phase 7] Container Health Probes & Upstream Reverse Proxy");
     const healthProbeRes = await fetch(`${baseUrl}/api/routing/health/${project.id}`, {
-      headers: { Cookie: cookie },
+      headers: { Cookie: newCookie },
     });
     assert(healthProbeRes.status === 200, "On-demand container health check probe succeeded (200 OK)");
     const healthData = await healthProbeRes.json();
     assert(healthData.probe.healthy === true, "Container probe confirms healthy status");
     assert(healthData.port === 4000, "Container probe probed configured internal port 4000");
 
-    const routingTableRes = await fetch(`${baseUrl}/api/routing/table`);
+    const routingTableRes = await fetch(`${baseUrl}/api/routing/table`, {
+      headers: { Cookie: newCookie },
+    });
     assert(routingTableRes.status === 200, "Active reverse proxy routing table retrieved (200 OK)");
     const routingTableData = await routingTableRes.json();
     assert(routingTableData.active_routes_count >= 1, "Routing table contains registered container upstreams");
+    const { generateNginxConfig } = require("../services/proxyRouter.js");
+    const nginxConf = generateNginxConfig();
     assert(
-      routingTableData.nginx_config.includes("upstream") && routingTableData.nginx_config.includes("proxy_pass"),
+      nginxConf.includes("upstream") && nginxConf.includes("proxy_pass"),
       "Dynamic Nginx reverse proxy configuration generated successfully"
     );
 

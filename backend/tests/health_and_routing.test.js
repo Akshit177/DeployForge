@@ -81,25 +81,13 @@ async function runTestSuite() {
     assert(nginxConf.includes(`server_name ${testDomain};`), "Nginx config generated server block for domain");
     assert(nginxConf.includes("proxy_pass http://upstream_test_app_8080;"), "Nginx config includes proxy_pass directive");
 
-    // 4. API: GET /api/routing/table
-    const tableRes = await fetch(`${baseUrl}/api/routing/table`);
-    assert(tableRes.status === 200, "GET /api/routing/table returns 200 OK");
-    const tableData = await tableRes.json();
-    assert(tableData.active_routes_count >= 1, "Routing table reports active routes count");
-    assert(Array.isArray(tableData.routes), "Routing table contains routes array");
-    assert(typeof tableData.nginx_config === "string", "Routing table provides nginx_config block");
+    // 4. API: Unauthenticated routing endpoints must return 401
+    const unauthTableRes = await fetch(`${baseUrl}/api/routing/table`);
+    assert(unauthTableRes.status === 401, "GET /api/routing/table without token returns 401 Unauthorized");
 
-    // 5. API: GET /api/routing/resolve/:domain
-    const resolveRes = await fetch(`${baseUrl}/api/routing/resolve/${testDomain}`);
-    assert(resolveRes.status === 200, "GET /api/routing/resolve/:domain returns 200 OK");
-    const resolveData = await resolveRes.json();
-    assert(resolveData.matched === true, "Domain resolution API returns matched: true");
-    assert(resolveData.target_upstream === "http://127.0.0.1:8080", "Domain resolution API returns target upstream URL");
+    const unauthResolveRes = await fetch(`${baseUrl}/api/routing/resolve/${testDomain}`);
+    assert(unauthResolveRes.status === 401, "GET /api/routing/resolve/:domain without token returns 401 Unauthorized");
 
-    const nonExistentRes = await fetch(`${baseUrl}/api/routing/resolve/unknown-never-registered.app`);
-    assert(nonExistentRes.status === 404, "Unregistered domain returns 404 Not Found");
-
-    // 6. API: Authenticated On-Demand Health Probe (GET /api/routing/health/:projectId)
     const unauthHealthRes = await fetch(`${baseUrl}/api/routing/health/dummy-project-id`);
     assert(unauthHealthRes.status === 401, "GET /api/routing/health without token returns 401 Unauthorized");
 
@@ -131,7 +119,41 @@ async function runTestSuite() {
     assert(projRes.status === 201, "Project created successfully");
     const createdProject = (await projRes.json()).project;
 
-    // Run health check on project
+    // Register upstream route associated with User A's project
+    registerUpstreamRoute(testDomain, {
+      projectId: createdProject.id,
+      projectName: createdProject.name,
+      deploymentId: "dep-456",
+      containerId: "c_dep456",
+      targetHost: "127.0.0.1",
+      port: 8080,
+      status: "Healthy",
+    });
+
+    // 5. API: Authenticated GET /api/routing/table & resolve for User A
+    const tableRes = await fetch(`${baseUrl}/api/routing/table`, {
+      headers: { Cookie: cookieA },
+    });
+    assert(tableRes.status === 200, "Authenticated GET /api/routing/table returns 200 OK");
+    const tableData = await tableRes.json();
+    assert(tableData.active_routes_count >= 1, "Routing table reports active routes count for owner");
+    assert(Array.isArray(tableData.routes), "Routing table contains routes array");
+    assert(tableData.nginx_config === undefined, "Routing table does not leak raw nginx_config");
+
+    const resolveRes = await fetch(`${baseUrl}/api/routing/resolve/${testDomain}`, {
+      headers: { Cookie: cookieA },
+    });
+    assert(resolveRes.status === 200, "Authenticated GET /api/routing/resolve/:domain returns 200 OK");
+    const resolveData = await resolveRes.json();
+    assert(resolveData.matched === true, "Domain resolution API returns matched: true");
+    assert(resolveData.target_upstream === "http://127.0.0.1:8080", "Domain resolution API returns target upstream URL");
+
+    const nonExistentRes = await fetch(`${baseUrl}/api/routing/resolve/unknown-never-registered.app`, {
+      headers: { Cookie: cookieA },
+    });
+    assert(nonExistentRes.status === 404, "Unregistered domain returns 404 Not Found");
+
+    // 6. API: Authenticated On-Demand Health Probe (GET /api/routing/health/:projectId)
     const healthCheckRes = await fetch(`${baseUrl}/api/routing/health/${createdProject.id}`, {
       headers: { Cookie: cookieA },
     });
@@ -155,6 +177,21 @@ async function runTestSuite() {
     });
     assert(regResB.status === 201, "User B registered successfully");
     const cookieB = regResB.headers.get("set-cookie").split(";")[0];
+
+    // User B tries to view User A's routes in /api/routing/table
+    const userBTableRes = await fetch(`${baseUrl}/api/routing/table`, {
+      headers: { Cookie: cookieB },
+    });
+    assert(userBTableRes.status === 200, "User B GET /api/routing/table returns 200");
+    const userBTableData = await userBTableRes.json();
+    const hasUserARoute = userBTableData.routes.some((r) => r.domain === testDomain);
+    assert(!hasUserARoute, "User B cannot view User A's route in /api/routing/table");
+
+    // User B tries to resolve User A's domain
+    const userBResolveRes = await fetch(`${baseUrl}/api/routing/resolve/${testDomain}`, {
+      headers: { Cookie: cookieB },
+    });
+    assert(userBResolveRes.status === 404, "User B cannot resolve User A's domain (404 Isolated)");
 
     // User B tries to probe User A's project
     const crossHealthRes = await fetch(`${baseUrl}/api/routing/health/${createdProject.id}`, {
