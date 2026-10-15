@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
+const { parsePagination } = require("../middleware/pagination.js");
 const { publishDeploymentJob } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 
@@ -77,12 +78,28 @@ function formatProject(p) {
 router.use(authenticateToken);
 
 // GET /api/projects - List all projects for authenticated user
-router.get("/", async (req, res) => {
+router.get("/", parsePagination, async (req, res) => {
+  const { limit, offset, since, until } = req.pagination;
+
   try {
-    const result = await pool.query(
-      `SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
-      [req.user.id]
-    );
+    const params = [req.user.id];
+    let query = `SELECT * FROM projects WHERE user_id = $1`;
+
+    if (since) {
+      params.push(since);
+      query += ` AND created_at >= $${params.length}`;
+    }
+
+    if (until) {
+      params.push(until);
+      query += ` AND created_at <= $${params.length}`;
+    }
+
+    params.push(limit);
+    params.push(offset);
+    query += ` ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
+
+    const result = await pool.query(query, params);
 
     const projects = result.rows.map(formatProject);
     return res.status(200).json({

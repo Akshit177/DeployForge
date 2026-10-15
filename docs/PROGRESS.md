@@ -141,3 +141,27 @@
   - Ran containerized verification: confirmed `GET /` and `GET /projects` return `<div id="root"></div>`, and missing asset request `GET /assets/missing.js` returns HTTP 404.
 - **Verification result:** VERIFIED — Docker image builds cleanly; container serves SPA on root and deep paths; returns 404 on missing assets.
 - **Anything deferred:** None.
+
+### P-01: Validate pagination limits and date filters
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added reusable `parsePagination` middleware in `backend/middleware/pagination.js` that strictly parses and validates query parameters (`limit`, `offset`, `since`, `until`).
+  - Clamps `limit` to range `[1, 200]` (defaulting to 50 if omitted, clamping values > 200 down to 200, and rejecting non-positive or non-integer values with 400).
+  - Enforces `offset >= 0` (defaulting to 0 if omitted, rejecting negative or non-integer values with 400).
+  - Parses ISO-8601 date filters `since` and `until` into valid `Date` objects, rejecting unparseable date values with 400.
+  - Wired `parsePagination` into list endpoints across `backend/routes/deployments.js`, `backend/routes/projects.js`, and `backend/routes/logs.js` using parameterized SQL queries.
+  - Stopped `SELECT *` in the auth fallback path (`backend/middleware/auth.js`) when authenticating without a Redis session, selecting explicit safe columns (`id, name, email, github_connected, github_username, notification_preferences, created_at, updated_at`) so password hashes never flow into `req.user`.
+- **Files touched:**
+  - `backend/middleware/pagination.js`
+  - `backend/routes/deployments.js`
+  - `backend/routes/projects.js`
+  - `backend/routes/logs.js`
+  - `backend/middleware/auth.js`
+  - `backend/package.json`
+  - `backend/tests/pagination.test.js`
+- **Tests added / updated:**
+  - `backend/tests/pagination.test.js`: Added 18 tests (3 unit tests on middleware + 15 table-driven API integration tests) validating default limits, clamping upper bounds, rejecting non-positive/malformed limits and offsets, date validation, and asserting `req.user` excludes password/password_hash on sessionless auth fallback.
+- **Verification result:** VERIFIED — Table-driven API tests pass; full test suite (16 backend test files, 28 C++ worker tests, frontend build) all pass cleanly.
+- **Anything deferred:** None.
+

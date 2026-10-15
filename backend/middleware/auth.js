@@ -38,13 +38,20 @@ async function authenticateToken(req, res, next) {
 
     // Fallback: Query PostgreSQL directly
     try {
-        const user = await pool.query("SELECT * FROM users WHERE id = $1", [decoded.id]);
+        const user = await pool.query(
+            "SELECT id, name, email, github_connected, github_username, notification_preferences, created_at, updated_at FROM users WHERE id = $1",
+            [decoded.id]
+        );
 
         if (user.rows.length === 0) {
             return res.status(404).json({ message: "User not found." });
         }
 
-        req.user = user.rows[0];
+        const u = user.rows[0];
+        req.user = {
+            ...u,
+            user_name: u.name,
+        };
         req.sessionId = decoded.sid || null;
         return next();
     } catch (error) {

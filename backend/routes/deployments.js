@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken, assertOwnsDeployment } = require("../middleware/auth.js");
+const { parsePagination } = require("../middleware/pagination.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
@@ -95,8 +96,9 @@ router.get("/queue/status", async (req, res) => {
 });
 
 // GET /api/deployments - List user's deployments with optional filters
-router.get("/", async (req, res) => {
-  const { project_id, status, limit = 50, offset = 0 } = req.query;
+router.get("/", parsePagination, async (req, res) => {
+  const { project_id, status } = req.query;
+  const { limit, offset, since, until } = req.pagination;
 
   try {
     const params = [req.user.id];
@@ -125,8 +127,18 @@ router.get("/", async (req, res) => {
       query += ` AND d.status = $${params.length}`;
     }
 
-    params.push(Number.parseInt(limit, 10) || 50);
-    params.push(Number.parseInt(offset, 10) || 0);
+    if (since) {
+      params.push(since);
+      query += ` AND d.created_at >= $${params.length}`;
+    }
+
+    if (until) {
+      params.push(until);
+      query += ` AND d.created_at <= $${params.length}`;
+    }
+
+    params.push(limit);
+    params.push(offset);
     query += ` ORDER BY d.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
     const result = await pool.query(query, params);

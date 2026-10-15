@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken, assertOwnsDeployment, assertOwnsProject } = require("../middleware/auth.js");
+const { parsePagination } = require("../middleware/pagination.js");
 const { verifyAccessToken } = require("../services/auth.js");
 const {
   emitDeploymentLog,
@@ -66,8 +67,9 @@ async function authenticateSseOrCookie(req, res, next) {
 }
 
 // GET /api/logs - Historical logs
-router.get("/", authenticateSseOrCookie, async (req, res) => {
-  const { deployment_id, project_id, level, limit = 100, since } = req.query;
+router.get("/", authenticateSseOrCookie, parsePagination, async (req, res) => {
+  const { deployment_id, project_id, level } = req.query;
+  const { limit, offset, since, until } = req.pagination;
 
   try {
     const params = [req.user.id];
@@ -99,13 +101,18 @@ router.get("/", authenticateSseOrCookie, async (req, res) => {
     }
 
     if (since) {
-      params.push(new Date(since));
+      params.push(since);
       query += ` AND l.created_at > $${params.length}`;
     }
 
-    const parsedLimit = Math.min(Math.max(1, Number.parseInt(limit, 10) || 100), 500);
-    params.push(parsedLimit);
-    query += ` ORDER BY l.created_at ASC LIMIT $${params.length}`;
+    if (until) {
+      params.push(until);
+      query += ` AND l.created_at <= $${params.length}`;
+    }
+
+    params.push(limit);
+    params.push(offset);
+    query += ` ORDER BY l.created_at ASC LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
     const result = await pool.query(query, params);
     const logs = result.rows.map(formatLogEntry);
