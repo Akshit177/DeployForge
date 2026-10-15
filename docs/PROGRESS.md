@@ -61,5 +61,25 @@
   - `backend/tests/logs_api.test.js`: Added tests asserting cross-tenant log forging returns 404, cross-tenant deployment and project SSE stream connections return 404, and cross-tenant live hot state queries return 404.
 - **Verification result:** VERIFIED — Reproduction script confirmed 404 across forge, live hot-state, and stream checks; full test suite passed.
 - **Anything deferred:** None.
-
-
+### S-05: Default/fallback secrets
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added startup configuration validator `backend/config/validateEnv.js` wired into `backend/server.js`, failing fast in production mode if `JWT_SECRET` or `ENCRYPTION_KEY` are missing, shorter than 32 characters, use insecure defaults, or collide; and failing if `DB_PASSWORD` is `'postgres'`.
+  - Updated `backend/services/crypto.js` to enforce distinct `ENCRYPTION_KEY` from `JWT_SECRET` in production, prepended key-version byte `01` to ciphertext on encryption, and supported backwards-compatible decryption for unversioned legacy ciphertext.
+  - Gated demo user creation in `backend/database/migrate.js` behind `SEED_DEMO === 'true'` and non-production environment.
+  - Updated `docker-compose.yml` to use required variable syntax (`${DB_PASSWORD:?set DB_PASSWORD}`, `${JWT_SECRET:?set JWT_SECRET}`, `${ENCRYPTION_KEY:?set ENCRYPTION_KEY}`).
+  - Updated `.env.example` to document required production secrets, distinct key requirements, key generation commands (`openssl rand -base64 32`), and `SEED_DEMO`.
+- **Files touched:**
+  - `backend/config/validateEnv.js`
+  - `backend/server.js`
+  - `backend/services/crypto.js`
+  - `backend/database/migrate.js`
+  - `docker-compose.yml`
+  - `.env.example`
+  - `backend/package.json`
+  - `backend/tests/validate_env.test.js`
+- **Tests added / updated:**
+  - `backend/tests/validate_env.test.js`: Added 13 tests verifying production fail-fast on missing/short/default/colliding secrets, development non-strictness, key-version prefixing ("01"), legacy ciphertext decryption compatibility, and tampering rejection.
+- **Verification result:** VERIFIED — `NODE_ENV=production node backend/server.js` exits non-zero with explicit error message; `docker compose config` without env exits with code 1 naming missing variables; test suite (14 backend test runs, 28 C++ unit tests, frontend build) all pass.
+- **Anything deferred:** None.

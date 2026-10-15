@@ -8,6 +8,9 @@ const dotenv = require("dotenv");
 dotenv.config({ path: path.join(__dirname, ".env") });
 dotenv.config();
 
+const { validateEnv } = require("./config/validateEnv.js");
+validateEnv();
+
 const authRoutes = require("./routes/auth.js");
 const projectRoutes = require("./routes/projects.js");
 const deploymentRoutes = require("./routes/deployments.js");

@@ -15,14 +15,16 @@ async function runMigrations() {
       ALTER TABLE deployments ALTER COLUMN status SET DEFAULT 'INITIATED';
     `);
 
-    const bcrypt = require("bcryptjs");
-    const demoHash = await bcrypt.hash("password123", 10);
-    await pool.query(
-      `INSERT INTO users (name, email, password_hash, github_connected)
-       VALUES ('Anurag Singh', 'anurag@deployforge.dev', $1, true)
-       ON CONFLICT (email) DO NOTHING`,
-      [demoHash]
-    );
+    if (process.env.SEED_DEMO === "true" && process.env.NODE_ENV !== "production") {
+      const bcrypt = require("bcryptjs");
+      const demoHash = await bcrypt.hash("password123", 10);
+      await pool.query(
+        `INSERT INTO users (name, email, password_hash, github_connected)
+         VALUES ('Anurag Singh', 'anurag@deployforge.dev', $1, true)
+         ON CONFLICT (email) DO NOTHING`,
+        [demoHash]
+      );
+    }
 
     console.log("Database schema migrations applied successfully.");
   } catch (error) {
