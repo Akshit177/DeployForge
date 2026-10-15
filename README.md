@@ -361,7 +361,7 @@ Contributions, suggestions, and bug reports are welcome.
 
 ## License
 
-The project's license has not yet been specified. Add a `LICENSE` file and update this section before distributing the project.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 

@@ -149,3 +149,7 @@ node_modules/
 CONTEXT.md
 fixes.md
 roadmap.md
+
+# Generated reverse proxy configuration
+nginx/conf.d/deployforge-upstreams.conf
+

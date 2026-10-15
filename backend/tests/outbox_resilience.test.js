@@ -45,8 +45,12 @@ describe("F-06: Outbox Resilience and Redis Outage Handling", () => {
       if (testUserId) {
         await pool.query(`DELETE FROM users WHERE id = $1`, [testUserId]);
       }
-      await pool.end();
+    } catch (_) {}
+    try {
       redis.disconnect();
+    } catch (_) {}
+    try {
+      await pool.end();
     } catch (_) {}
   });
 

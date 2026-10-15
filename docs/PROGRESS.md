@@ -165,3 +165,29 @@
 - **Verification result:** VERIFIED — Table-driven API tests pass; full test suite (16 backend test files, 28 C++ worker tests, frontend build) all pass cleanly.
 - **Anything deferred:** None.
 
+### H-01: Repo hygiene, untrack generated config, and remove dead code
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Removed dead `backend/models/user.js` (leftover prototype model from mongoose).
+  - Removed unused `mongoose` dependency from `backend/package.json`.
+  - Confirmed `backend/main.html` and `backend/MOCK_DATA.json` are not tracked in git and removed.
+  - Untracked generated runtime file `nginx/conf.d/deployforge-upstreams.conf` from git tracking via `git rm --cached` and added it to `.gitignore` so test runs no longer dirty git status.
+  - Added MIT `LICENSE` file in the repository root and updated `README.md` License section to reference the MIT License.
+  - Hardened after-hooks in `backend/tests/outbox_resilience.test.js` to ensure Redis connections and DB pools always close cleanly.
+- **Files touched:**
+  - `backend/models/user.js` (deleted)
+  - `backend/package.json`
+  - `.gitignore`
+  - `nginx/conf.d/deployforge-upstreams.conf` (untracked)
+  - `LICENSE` (created)
+  - `README.md`
+  - `backend/tests/outbox_resilience.test.js`
+- **Tests added / updated:**
+  - Ran backend test suite `npm test` (all 16 test files pass cleanly).
+  - Ran worker test suite `make -C worker test` (28/28 tests pass).
+  - Ran frontend build `npm --prefix frontend run build` (builds cleanly with Vite).
+- **Verification result:** VERIFIED — `git status --porcelain` shows no modified files after test runs; all test suites pass with 100% success.
+- **Anything deferred:** Phase 1 / Phase 2 scope of H-01 (.env.example cleanup and further hygiene as noted in roadmap).
+
+
