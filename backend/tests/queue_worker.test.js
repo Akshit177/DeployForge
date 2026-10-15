@@ -36,11 +36,12 @@ async function runTestSuite() {
     );
     const userId = userRes.rows[0].id;
 
+    const testProjectName = `worker-test-${Date.now()}`;
     const projectRes = await pool.query(
       `INSERT INTO projects (user_id, name, repository_url, branch, runtime, port, domain)
-       VALUES ($1, $2, $3, 'main', 'node', 3000, 'worker-test.deployforge.app')
+       VALUES ($1, $2, $3, 'main', 'node', 3000, $4)
        RETURNING id, name, domain`,
-      [userId, `worker-test-${Date.now() % 10000}`, "https://github.com/acme/worker-test"]
+      [userId, testProjectName, "https://github.com/acme/worker-test", `${testProjectName}.deployforge.app`]
     );
     const project = projectRes.rows[0];
 

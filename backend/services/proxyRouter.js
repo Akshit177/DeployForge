@@ -130,7 +130,8 @@ function generateNginxConfig() {
 
   for (const route of routes) {
     const safeProjectSlug = route.project_name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
-    const safeUpstreamName = `upstream_${route.project_name.toLowerCase().replace(/[^a-z0-9_]/g, "_")}_${route.port}`;
+    const safeProjectIdShort = String(route.project_id || "app").replace(/[^a-z0-9]/gi, "").slice(0, 12).toLowerCase();
+    const safeUpstreamName = `upstream_df_${safeProjectIdShort}_${route.port}`;
 
     let serverNames = `    server_name ${route.domain};\n`;
     if (includeDevDomains) {

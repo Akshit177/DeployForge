@@ -249,7 +249,31 @@
   - `backend/tests/nginx_manager.test.js`: 4 tests (debounced burst coalescing with 50 concurrent calls, atomic file rename leaving no stray `.tmp` files, conditional dev domain inclusion, and WebSocket upgrade header mapping).
 - **Verification result:** VERIFIED — 50 parallel `syncNginxConfig()` calls coalesced to 1 actual write/reload with all 50 resolving `{ synced: true }`; full test suite (18 backend test files, 28 C++ worker tests, frontend build) all pass with 100% success; git status clean of runtime test debris.
 - **Anything deferred:** None.
-
-
-
-
+### S-04: Global domain uniqueness, reserved slugs, and collision-free upstreams
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added unique constraint `CONSTRAINT uq_projects_domain UNIQUE (domain)` to `projects` table in `backend/database/schema.sql`.
+  - Added migration in `backend/database/migrate.js` to deduplicate existing duplicate domains using window functions (keeping oldest unchanged and suffixing the rest) and enforce `uq_projects_domain`.
+  - Defined `RESERVED_SLUGS` and implemented `allocateDomain(client, baseSlug, excludeProjectId)` in `backend/routes/projects.js` to reject reserved names (`api`, `www`, `admin`, `app`, `dashboard`, `status`, `health`, `auth`, `login`, `static`, `deployforge`) and sequentially assign unique suffixed subdomains (`-2`, `-3`, ...) on collision.
+  - Wired `allocateDomain` and reserved slug validation into `POST /api/projects` and `PATCH /api/projects/:id` wrapped in database transactions.
+  - Hardened Nginx dynamic config generator in `backend/services/proxyRouter.js` to generate collision-free upstream block names hashed by project ID (`upstream_df_${safeProjectIdShort}_${port}`) rather than project name.
+  - Updated upstream assertions in `backend/tests/health_and_routing.test.js` and `backend/tests/phase_c_integration.test.js`.
+  - Added dedicated test suite `backend/tests/domain_allocation.test.js` covering reserved slug rejection, cross-tenant domain allocation collision avoidance, renaming reallocation, and collision-free Nginx upstreams.
+  - Appended `tests/domain_allocation.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `backend/database/schema.sql`
+  - `backend/database/migrate.js`
+  - `backend/routes/projects.js`
+  - `backend/services/proxyRouter.js`
+  - `backend/package.json`
+  - `backend/tests/domain_allocation.test.js`
+  - `backend/tests/health_and_routing.test.js`
+  - `backend/tests/phase_c_integration.test.js`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/domain_allocation.test.js`: 4 tests (reserved slug 400 rejection across all reserved names, two tenants creating same project name receiving distinct suffixed domains, renaming with collision handling and reserved validation, and Nginx upstream generator collision-free hashing).
+  - `backend/tests/health_and_routing.test.js`: updated upstream block and proxy_pass assertions to match `upstream_df_proj123_8080`.
+  - `backend/tests/phase_c_integration.test.js`: updated upstream block and proxy_pass assertions to match `upstream_df_${expectedShortId}_3000`.
+- **Verification result:** VERIFIED — Migrations applied cleanly; all 19 backend test files passed (100%); 28 C++ worker tests passed; frontend build succeeded; git working tree clean of test runtime debris.
+- **Anything deferred:** None.

@@ -14,6 +14,27 @@ async function runMigrations() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb;
       ALTER TABLE deployments ALTER COLUMN status SET DEFAULT 'INITIATED';
       ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+
+      DO $$
+      DECLARE
+          r RECORD;
+          cnt INT;
+      BEGIN
+          FOR r IN
+              SELECT id, domain, ROW_NUMBER() OVER (PARTITION BY domain ORDER BY created_at ASC) as rn
+              FROM projects
+              WHERE domain IS NOT NULL
+          LOOP
+              IF r.rn > 1 THEN
+                  UPDATE projects
+                  SET domain = replace(domain, '.deployforge.app', '') || '-' || r.rn || '.deployforge.app'
+                  WHERE id = r.id;
+              END IF;
+          END LOOP;
+      END $$;
+
+      ALTER TABLE projects DROP CONSTRAINT IF EXISTS uq_projects_domain;
+      ALTER TABLE projects ADD CONSTRAINT uq_projects_domain UNIQUE (domain);
     `);
 
     if (process.env.SEED_DEMO === "true" && process.env.NODE_ENV !== "production") {

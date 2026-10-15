@@ -213,10 +213,11 @@ describe("Phase C: Docker Daemon Integration & Nginx Data Plane Suite", () => {
       });
 
       const config = generateNginxConfig();
-      assert.ok(config.includes("upstream upstream_test_app_3000"));
+      const expectedShortId = String(testProject.id).replace(/[^a-z0-9]/gi, "").slice(0, 12).toLowerCase();
+      assert.ok(config.includes(`upstream upstream_df_${expectedShortId}_3000`));
       assert.ok(config.includes("server df-dep-test-123:3000"));
       assert.ok(config.includes("server_name test-app.internal;"));
-      assert.ok(config.includes("proxy_pass http://upstream_test_app_3000;"));
+      assert.ok(config.includes(`proxy_pass http://upstream_df_${expectedShortId}_3000;`));
     });
 
     it("synchronizes generated config to disk", async () => {

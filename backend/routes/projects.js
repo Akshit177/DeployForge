@@ -11,6 +11,46 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const ALLOWED_RUNTIMES = ["node", "python", "go", "docker", "static"];
 const GIT_REPO_REGEX = /^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?$/i;
 const BRANCH_REGEX = /^[A-Za-z0-9._/-]{1,100}$/;
+const RESERVED_SLUGS = new Set([
+  "api",
+  "www",
+  "admin",
+  "app",
+  "dashboard",
+  "status",
+  "health",
+  "auth",
+  "login",
+  "static",
+  "deployforge",
+]);
+
+async function allocateDomain(client, baseSlug, excludeProjectId = null) {
+  const slug = String(baseSlug || "").trim().toLowerCase();
+  if (RESERVED_SLUGS.has(slug)) {
+    return { error: "Project name / domain prefix is reserved. Please choose another name." };
+  }
+
+  const baseDomain = `${slug}.deployforge.app`;
+  const checkQuery = `SELECT id FROM projects WHERE domain = $1 ${excludeProjectId ? "AND id != $2" : ""}`;
+  const checkParams = excludeProjectId ? [baseDomain, excludeProjectId] : [baseDomain];
+
+  const existing = await client.query(checkQuery, checkParams);
+  if (existing.rows.length === 0) {
+    return { domain: baseDomain };
+  }
+
+  for (let counter = 2; counter <= 1000; counter++) {
+    const candidate = `${slug}-${counter}.deployforge.app`;
+    const candidateParams = excludeProjectId ? [candidate, excludeProjectId] : [candidate];
+    const candidateCheck = await client.query(checkQuery, candidateParams);
+    if (candidateCheck.rows.length === 0) {
+      return { domain: candidate };
+    }
+  }
+
+  return { error: "Unable to allocate unique domain after 1000 attempts." };
+}
 
 function sanitizeProjectName(rawName) {
   if (typeof rawName !== "string") return "";
@@ -138,6 +178,12 @@ router.post("/", async (req, res) => {
     });
   }
 
+  if (RESERVED_SLUGS.has(projectSlug)) {
+    return res.status(400).json({
+      message: "Project name / domain prefix is reserved. Please choose another name.",
+    });
+  }
+
   if (!normalizedRepo || !GIT_REPO_REGEX.test(normalizedRepo)) {
     return res.status(400).json({
       message: "Please provide a valid HTTPS repository URL from GitHub, GitLab, or Bitbucket (e.g., https://github.com/organization/repository).",
@@ -164,7 +210,6 @@ router.post("/", async (req, res) => {
   }
   const isAutoDeploy = autoDeploy !== undefined ? Boolean(autoDeploy) : Boolean(auto_deploy);
   const varsToSave = Array.isArray(envVars) ? envVars : Array.isArray(env_vars) ? env_vars : [];
-  const domain = `${projectSlug}.deployforge.app`;
 
   const client = await pool.connect();
   try {
@@ -182,6 +227,13 @@ router.post("/", async (req, res) => {
         message: `You already have a project named "${projectSlug}". Please choose a different name.`,
       });
     }
+
+    const domainAlloc = await allocateDomain(client, projectSlug);
+    if (domainAlloc.error) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: domainAlloc.error });
+    }
+    const domain = domainAlloc.domain;
 
     const insertResult = await client.query(
       `INSERT INTO projects (
@@ -257,6 +309,11 @@ router.post("/", async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
     if (error.code === "23505") {
+      if (error.constraint === "uq_projects_domain") {
+        return res.status(409).json({
+          message: "Domain collision occurred. Please choose a different name or try again.",
+        });
+      }
       return res.status(409).json({
         message: `You already have a project named "${projectSlug}". Please choose a different name.`,
       });
@@ -303,13 +360,17 @@ router.patch("/:id", async (req, res) => {
     return res.status(400).json({ message: "Invalid project ID format." });
   }
 
+  const client = await pool.connect();
   try {
-    const check = await pool.query(
+    await client.query("BEGIN");
+
+    const check = await client.query(
       `SELECT * FROM projects WHERE id = $1 AND user_id = $2`,
       [id, req.user.id]
     );
 
     if (check.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ message: "Project not found." });
     }
 
@@ -331,18 +392,31 @@ router.patch("/:id", async (req, res) => {
     if (name !== undefined) {
       const sanitized = sanitizeProjectName(name);
       if (!sanitized || sanitized.length < 2) {
+        await client.query("ROLLBACK");
         return res.status(400).json({ message: "Invalid project name." });
       }
+      if (RESERVED_SLUGS.has(sanitized)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Project name / domain prefix is reserved. Please choose another name.",
+        });
+      }
       if (sanitized !== current.name) {
-        const dup = await pool.query(
+        const dup = await client.query(
           `SELECT id FROM projects WHERE user_id = $1 AND name = $2 AND id != $3`,
           [req.user.id, sanitized, id]
         );
         if (dup.rows.length > 0) {
+          await client.query("ROLLBACK");
           return res.status(409).json({ message: `Project named "${sanitized}" already exists.` });
         }
         newName = sanitized;
-        newDomain = `${sanitized}.deployforge.app`;
+        const domainAlloc = await allocateDomain(client, sanitized, id);
+        if (domainAlloc.error) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: domainAlloc.error });
+        }
+        newDomain = domainAlloc.domain;
       }
     }
 
@@ -350,6 +424,7 @@ router.patch("/:id", async (req, res) => {
     if (branch !== undefined) {
       const trimmedBranch = String(branch).trim();
       if (!BRANCH_REGEX.test(trimmedBranch) || trimmedBranch.startsWith("-")) {
+        await client.query("ROLLBACK");
         return res.status(400).json({
           message: "Invalid branch name. Must be 1-100 characters and cannot start with a hyphen.",
         });
@@ -362,6 +437,7 @@ router.patch("/:id", async (req, res) => {
     if (port !== undefined) {
       const parsedPort = Number(port);
       if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+        await client.query("ROLLBACK");
         return res.status(400).json({
           message: "Internal container port must be an integer between 1024 and 65535.",
         });
@@ -384,7 +460,7 @@ router.patch("/:id", async (req, res) => {
     const envVarsJson = typeof varsSource === "string" ? varsSource : JSON.stringify(varsSource || []);
     const newStatus = status !== undefined ? String(status).trim() : current.status;
 
-    const updateResult = await pool.query(
+    const updateResult = await client.query(
       `UPDATE projects
        SET name = $1,
            domain = $2,
@@ -400,13 +476,21 @@ router.patch("/:id", async (req, res) => {
       [newName, newDomain, newBranch, newRuntime, newPort, newAutoDeploy, envVarsJson, newStatus, id, req.user.id]
     );
 
+    await client.query("COMMIT");
+
     return res.status(200).json({
       message: "Project updated successfully.",
       project: formatProject(updateResult.rows[0]),
     });
   } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "A collision occurred with the project name or domain." });
+    }
     console.error("Failed to update project:", error);
     return res.status(500).json({ message: "Unable to update project." });
+  } finally {
+    client.release();
   }
 });
 
@@ -442,5 +526,8 @@ router.delete("/:id", async (req, res) => {
 const envRoutes = require("./envVars.js");
 router.use("/:projectId/env", envRoutes);
 router.use("/:id/env", envRoutes);
+
+router.allocateDomain = allocateDomain;
+router.RESERVED_SLUGS = RESERVED_SLUGS;
 
 module.exports = router;

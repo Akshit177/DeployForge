@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS projects (
     latest_commit VARCHAR(40) DEFAULT 'HEAD',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
-    CONSTRAINT uq_user_project_name UNIQUE (user_id, name)
+    CONSTRAINT uq_user_project_name UNIQUE (user_id, name),
+    CONSTRAINT uq_projects_domain UNIQUE (domain)
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);

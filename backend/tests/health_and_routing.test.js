@@ -77,9 +77,9 @@ async function runTestSuite() {
 
     // 3. Unit: Nginx Dynamic Configuration Generator
     const nginxConf = generateNginxConfig();
-    assert(nginxConf.includes("upstream upstream_test_app_8080"), "Nginx config generated upstream block");
+    assert(nginxConf.includes("upstream upstream_df_proj123_8080"), "Nginx config generated upstream block");
     assert(nginxConf.includes(`server_name ${testDomain};`), "Nginx config generated server block for domain");
-    assert(nginxConf.includes("proxy_pass http://upstream_test_app_8080;"), "Nginx config includes proxy_pass directive");
+    assert(nginxConf.includes("proxy_pass http://upstream_df_proj123_8080;"), "Nginx config includes proxy_pass directive");
 
     // 4. API: Unauthenticated routing endpoints must return 401
     const unauthTableRes = await fetch(`${baseUrl}/api/routing/table`);

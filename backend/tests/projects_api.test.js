@@ -121,6 +121,7 @@ async function runTestSuite() {
     assert(invalidPortPost.status === 400, "POST /api/projects with port < 1024 returns 400 Bad Request");
 
     // 6. POST /api/projects creates project for User A
+    await pool.query("DELETE FROM projects WHERE name = 'forge-service' OR domain LIKE 'forge-service%.deployforge.app'");
     const createRes = await fetch(`${baseUrl}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
