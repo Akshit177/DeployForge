@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     status VARCHAR(30) DEFAULT 'PENDING' NOT NULL,
     retry_count INT DEFAULT 0 NOT NULL,
     error_message TEXT,
+    next_retry_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     processed_at TIMESTAMP WITH TIME ZONE
 );

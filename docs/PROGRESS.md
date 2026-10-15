@@ -83,3 +83,23 @@
   - `backend/tests/validate_env.test.js`: Added 13 tests verifying production fail-fast on missing/short/default/colliding secrets, development non-strictness, key-version prefixing ("01"), legacy ciphertext decryption compatibility, and tampering rejection.
 - **Verification result:** VERIFIED — `NODE_ENV=production node backend/server.js` exits non-zero with explicit error message; `docker compose config` without env exits with code 1 naming missing variables; test suite (14 backend test runs, 28 C++ unit tests, frontend build) all pass.
 - **Anything deferred:** None.
+
+### F-06: Outbox loses jobs on Redis outage
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Removed error swallowing and fallback in `backend/services/queue.js` (`publishDeploymentJob` and `ensureConsumerGroup`), ensuring Redis publication failures strictly throw.
+  - Added `next_retry_at` column to `outbox_events` table in `backend/database/schema.sql` and `backend/database/migrate.js`.
+  - Updated `backend/services/outboxRelay.js` to implement exponential backoff on retry (`next_retry_at`), increment `retry_count` without marking PROCESSED on Redis errors, and mark event and deployment as `FAILED` (with diagnostic error message) after exceeding `MAX_RETRIES`.
+  - Added `reapStuckDeployments` to `backend/services/outboxRelay.js` to identify deployments stuck in `INITIATED`/`QUEUED` for longer than the reaper threshold with no active `PENDING` outbox tasks and fail them cleanly; wired reaper into the background outbox relay loop.
+- **Files touched:**
+  - `backend/services/queue.js`
+  - `backend/services/outboxRelay.js`
+  - `backend/database/schema.sql`
+  - `backend/database/migrate.js`
+  - `backend/package.json`
+  - `backend/tests/outbox_resilience.test.js`
+- **Tests added / updated:**
+  - `backend/tests/outbox_resilience.test.js`: Added 4 tests verifying `publishDeploymentJob` rejection on Redis failure, event staying `PENDING` with incrementing `retry_count` and exponential backoff during Redis outages, delivery to `PROCESSED` and deployment advancing to `QUEUED` upon Redis recovery, dead-lettering to `FAILED` after `MAX_RETRIES`, and reaping of stuck deployments.
+- **Verification result:** VERIFIED — Reproduction confirmed previous swallow behavior; full test suite (15 backend test files, 28 C++ worker tests, frontend build) all pass.
+- **Anything deferred:** None.

@@ -4,8 +4,10 @@ const { recordWorkerLog } = require("./logEmitter.js");
 
 const SWEEP_INTERVAL_MS = Number(process.env.OUTBOX_SWEEP_INTERVAL_MS || 3000);
 const MAX_RETRIES = Number(process.env.OUTBOX_MAX_RETRIES || 5);
+const REAPER_STUCK_MINUTES = Number(process.env.REAPER_STUCK_MINUTES || 10);
 
 let sweepTimer = null;
+let reaperTimer = null;
 let activeRelayPromise = null;
 
 /**
@@ -28,7 +30,9 @@ async function relayPendingEvents() {
       // Fetch batch of pending outbox events locking rows to prevent duplicate concurrent publishing
       const selectRes = await client.query(
         `SELECT * FROM outbox_events
-         WHERE status = 'PENDING' AND retry_count < $1
+         WHERE status = 'PENDING'
+           AND retry_count < $1
+           AND (next_retry_at IS NULL OR next_retry_at <= NOW())
          ORDER BY created_at ASC
          LIMIT 50
          FOR UPDATE SKIP LOCKED`,
@@ -128,13 +132,15 @@ async function relayPendingEvents() {
               ).catch(() => {});
             }
           } else {
-            // Increment retry count and preserve PENDING status for next sweep cycle
+            // Increment retry count with exponential backoff (2s, 4s, 8s, up to 60s)
+            const backoffSeconds = Math.min(Math.pow(2, nextRetry), 60);
             await client.query(
               `UPDATE outbox_events
                SET retry_count = $1,
-                   error_message = $2
-               WHERE id = $3`,
-              [nextRetry, redisErr.message, event.id]
+                   error_message = $2,
+                   next_retry_at = NOW() + ($3 || ' seconds')::interval
+               WHERE id = $4`,
+              [nextRetry, redisErr.message, backoffSeconds, event.id]
             );
           }
         }
@@ -168,6 +174,54 @@ function triggerOutboxRelay() {
 }
 
 /**
+ * Reap deployments stuck in INITIATED or QUEUED for > thresholdMinutes with no active PENDING outbox events.
+ * @param {number} thresholdMinutes
+ * @returns {Promise<Array>}
+ */
+async function reapStuckDeployments(thresholdMinutes = REAPER_STUCK_MINUTES) {
+  try {
+    const res = await pool.query(
+      `SELECT d.id, d.project_id, d.status
+       FROM deployments d
+       WHERE d.status IN ('INITIATED', 'QUEUED')
+         AND d.created_at < NOW() - ($1 || ' minutes')::interval
+         AND NOT EXISTS (
+           SELECT 1 FROM outbox_events o
+           WHERE o.aggregate_type = 'DEPLOYMENT'
+             AND o.aggregate_id = d.id
+             AND o.status = 'PENDING'
+         )`,
+      [thresholdMinutes]
+    );
+
+    for (const dep of res.rows) {
+      const errorMsg = `Deployment timed out: stuck in ${dep.status} status with no active outbox task`;
+      await pool.query(
+        `UPDATE deployments
+         SET status = 'FAILED', error_message = $1, updated_at = NOW()
+         WHERE id = $2 AND status IN ('INITIATED', 'QUEUED')`,
+        [errorMsg, dep.id]
+      );
+
+      if (dep.project_id) {
+        await pool.query(
+          `UPDATE projects
+           SET status = 'Failed', updated_at = NOW()
+           WHERE id = $1 AND status IN ('INITIATED', 'QUEUED')`,
+          [dep.project_id]
+        );
+      }
+      console.warn(`[OutboxReaper] Reaped stuck deployment ${dep.id} (was ${dep.status})`);
+    }
+
+    return res.rows;
+  } catch (err) {
+    console.error("[OutboxReaper] Error reaping stuck deployments:", err.message);
+    return [];
+  }
+}
+
+/**
  * Start the periodic background reliability sweep
  */
 function startOutboxRelayLoop(intervalMs = SWEEP_INTERVAL_MS) {
@@ -175,12 +229,20 @@ function startOutboxRelayLoop(intervalMs = SWEEP_INTERVAL_MS) {
 
   // Initial sweep immediately on boot
   relayPendingEvents().catch(() => {});
+  reapStuckDeployments().catch(() => {});
 
   sweepTimer = setInterval(() => {
     relayPendingEvents().catch((err) => {
       console.warn("[OutboxRelay] Periodic sweep warning:", err.message);
     });
   }, intervalMs);
+
+  // Periodic reaper check every 60s
+  reaperTimer = setInterval(() => {
+    reapStuckDeployments().catch((err) => {
+      console.warn("[OutboxReaper] Periodic check warning:", err.message);
+    });
+  }, 60000);
 
   console.log(`[OutboxRelay] Background sweep started (interval: ${intervalMs}ms)`);
 }
@@ -194,6 +256,10 @@ function stopOutboxRelayLoop() {
     sweepTimer = null;
     console.log("[OutboxRelay] Background sweep stopped.");
   }
+  if (reaperTimer) {
+    clearInterval(reaperTimer);
+    reaperTimer = null;
+  }
 }
 
 module.exports = {
@@ -201,6 +267,8 @@ module.exports = {
   triggerOutboxRelay,
   startOutboxRelayLoop,
   stopOutboxRelayLoop,
+  reapStuckDeployments,
   SWEEP_INTERVAL_MS,
   MAX_RETRIES,
+  REAPER_STUCK_MINUTES,
 };

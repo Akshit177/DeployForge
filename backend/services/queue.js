@@ -14,10 +14,11 @@ async function ensureConsumerGroup() {
     await redis.xgroup("CREATE", STREAM_NAME, CONSUMER_GROUP, "$", "MKSTREAM");
     isGroupCreated = true;
   } catch (err) {
-    if (err.message.includes("BUSYGROUP")) {
+    if (err.message && err.message.includes("BUSYGROUP")) {
       isGroupCreated = true;
     } else {
       console.warn("Could not create Redis consumer group:", err.message);
+      throw err;
     }
   }
 }
@@ -30,31 +31,22 @@ async function ensureConsumerGroup() {
 async function publishDeploymentJob(payload) {
   await ensureConsumerGroup();
 
-  try {
-    const fields = [
-      "deployment_id", payload.deployment_id || "",
-      "project_id", payload.project_id || "",
-      "user_id", payload.user_id || "",
-      "repo_url", payload.repo_url || payload.repository_url || "",
-      "branch", payload.branch || "main",
-      "commit_hash", payload.commit_hash || "HEAD",
-      "runtime", payload.runtime || "node",
-      "port", String(payload.port || 3000),
-      "trigger", payload.trigger || "manual",
-      "domain", payload.domain || payload.project_domain || "",
-      "project_name", payload.project_name || payload.projectName || "",
-      "created_at", new Date().toISOString(),
-    ];
+  const fields = [
+    "deployment_id", payload.deployment_id || "",
+    "project_id", payload.project_id || "",
+    "user_id", payload.user_id || "",
+    "repo_url", payload.repo_url || payload.repository_url || "",
+    "branch", payload.branch || "main",
+    "commit_hash", payload.commit_hash || "HEAD",
+    "runtime", payload.runtime || "node",
+    "port", String(payload.port || 3000),
+    "trigger", payload.trigger || "manual",
+    "domain", payload.domain || payload.project_domain || "",
+    "project_name", payload.project_name || payload.projectName || "",
+    "created_at", new Date().toISOString(),
+  ];
 
-    const messageId = await redis.xadd(STREAM_NAME, "*", ...fields);
-    return messageId;
-  } catch (error) {
-    if (process.env.ALLOW_REDIS_FALLBACK === "true") {
-      console.warn("Redis XADD failed, using fallback:", error.message);
-      return `local-${Date.now()}`;
-    }
-    throw error;
-  }
+  return await redis.xadd(STREAM_NAME, "*", ...fields);
 }
 
 /**
