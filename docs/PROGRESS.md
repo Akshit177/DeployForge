@@ -208,5 +208,20 @@
 - **Verification result:** VERIFIED — All 31 matrix tests pass; all 17 backend test suites pass with 100% success.
 - **Anything deferred:** None.
 
+### T-03: Add GitHub Actions CI workflow skeleton
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Created `.github/workflows/ci.yml` defining the CI pipeline for pull requests and pushes to `main` and `phase-*` branches.
+  - Configured PostgreSQL 16 and Redis 7 container services with health checks.
+  - Added steps for Node.js 20 setup, frontend build, database schema migration, backend test suite execution with isolated environment variables, C++ worker compilation and test suite execution, Docker Compose image build, and working tree cleanliness verification.
+- **Files touched:**
+  - `.github/workflows/ci.yml`
+- **Tests added / updated:**
+  - Verified YAML syntax of workflow definition.
+  - Ran full test verification matching CI pipeline steps locally: all 17 backend test files, 28 C++ worker tests, frontend build, and clean git state verification.
+- **Verification result:** VERIFIED — Local execution of CI pipeline steps succeeds with 100% pass; working tree remains clean after test runs.
+- **Anything deferred:** Full multi-platform matrix and GitHub Actions runner execution (Phase 1 / T-04).
+
 
 
