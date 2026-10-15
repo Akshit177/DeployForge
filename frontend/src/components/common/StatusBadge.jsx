@@ -11,12 +11,14 @@ const STATUS_MAP = {
   STARTING: { label: 'Starting', tone: 'warning', pulse: true },
   DEPLOYING: { label: 'Deploying', tone: 'warning', pulse: true },
   QUEUED: { label: 'Queued', tone: 'neutral', pulse: true },
+  INITIATED: { label: 'Initiated', tone: 'neutral', pulse: true },
   PENDING: { label: 'Pending', tone: 'neutral', pulse: true },
   FAILED: { label: 'Failed', tone: 'danger', pulse: false },
   ERROR: { label: 'Error', tone: 'danger', pulse: false },
   UNHEALTHY: { label: 'Unhealthy', tone: 'danger', pulse: false },
   STOPPED: { label: 'Stopped', tone: 'neutral', pulse: false },
   CANCELED: { label: 'Canceled', tone: 'neutral', pulse: false },
+  CANCELLED: { label: 'Cancelled', tone: 'neutral', pulse: false },
 };
 
 export default function StatusBadge({ status, value, size = 'md', className = '' }) {

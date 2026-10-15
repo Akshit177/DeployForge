@@ -10,6 +10,11 @@ const {
   registerUpstreamRoute,
   unregisterUpstreamRoute,
 } = require("../services/proxyRouter.js");
+const {
+  canTransition,
+  getAllowedPreviousStatuses,
+  normalizeStatus,
+} = require("../services/statusMachine.js");
 
 const CONSUMER_NAME = `persistence-${process.pid}`;
 let isLoopRunning = false;
@@ -65,33 +70,49 @@ async function applyEventTransaction(client, eventType, payload) {
 
   switch (eventType) {
     case "STAGE_CHANGED": {
-      if (validDepId && status) {
-        await client.query(
-          `UPDATE deployments SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [status, validDepId]
+      const targetStatus = normalizeStatus(status);
+      const allowedFrom = getAllowedPreviousStatuses(targetStatus);
+      if (validDepId && targetStatus) {
+        const depRes = await client.query(
+          `UPDATE deployments
+           SET status = $1, updated_at = NOW()
+           WHERE id = $2 AND status = ANY($3::varchar[])
+           RETURNING id, status`,
+          [targetStatus, validDepId, allowedFrom]
         );
+        if (depRes.rows.length === 0) {
+          console.warn(`[Persistence Worker] STAGE_CHANGED ignored for deployment ${validDepId}: transition to ${targetStatus} not allowed from current status`);
+          break;
+        }
       }
-      if (activeProjId && status) {
+      if (activeProjId && targetStatus) {
         await client.query(
           `UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [status, activeProjId]
+          [targetStatus, activeProjId]
         );
       }
       break;
     }
 
     case "DEPLOYMENT_COMPLETED": {
+      const targetStatus = "RUNNING";
+      const allowedFrom = getAllowedPreviousStatuses(targetStatus);
       if (validDepId) {
-        await client.query(
+        const depRes = await client.query(
           `UPDATE deployments
            SET status = 'RUNNING',
                duration_seconds = COALESCE($1, duration_seconds),
                container_id = COALESCE($2, container_id),
                container_name = COALESCE($3, container_name),
                updated_at = NOW()
-           WHERE id = $4`,
-          [duration_seconds || 0, container_id || null, depContainerName, validDepId]
+           WHERE id = $4 AND status = ANY($5::varchar[])
+           RETURNING id, status`,
+          [duration_seconds || 0, container_id || null, depContainerName, validDepId, allowedFrom]
         );
+        if (depRes.rows.length === 0) {
+          console.warn(`[Persistence Worker] DEPLOYMENT_COMPLETED ignored for deployment ${validDepId}: transition to RUNNING not allowed from current status`);
+          break;
+        }
       }
       if (activeProjId) {
         const projRes = await client.query(
@@ -121,19 +142,26 @@ async function applyEventTransaction(client, eventType, payload) {
     }
 
     case "DEPLOYMENT_FAILED": {
+      const targetStatus = "FAILED";
+      const allowedFrom = getAllowedPreviousStatuses(targetStatus);
       if (validDepId) {
-        await client.query(
+        const depRes = await client.query(
           `UPDATE deployments
            SET status = 'FAILED',
                error_message = $1,
                updated_at = NOW()
-           WHERE id = $2`,
-          [error_message || "Deployment failed", validDepId]
+           WHERE id = $2 AND status = ANY($3::varchar[])
+           RETURNING id, status`,
+          [error_message || "Deployment failed", validDepId, allowedFrom]
         );
+        if (depRes.rows.length === 0) {
+          console.warn(`[Persistence Worker] DEPLOYMENT_FAILED ignored for deployment ${validDepId}: transition to FAILED not allowed from current status`);
+          break;
+        }
       }
       if (activeProjId) {
         const projRes = await client.query(
-          `UPDATE projects SET status = 'Failed', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          `UPDATE projects SET status = 'FAILED', updated_at = NOW() WHERE id = $1 RETURNING domain`,
           [activeProjId]
         );
         const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);
@@ -145,19 +173,26 @@ async function applyEventTransaction(client, eventType, payload) {
     }
 
     case "DEPLOYMENT_CANCELLED": {
+      const targetStatus = "CANCELLED";
+      const allowedFrom = getAllowedPreviousStatuses(targetStatus);
       if (validDepId) {
-        await client.query(
+        const depRes = await client.query(
           `UPDATE deployments
-           SET status = 'Cancelled',
+           SET status = 'CANCELLED',
                error_message = 'Deployment cancelled by user.',
                updated_at = NOW()
-           WHERE id = $1`,
-          [validDepId]
+           WHERE id = $1 AND status = ANY($2::varchar[])
+           RETURNING id, status`,
+          [validDepId, allowedFrom]
         );
+        if (depRes.rows.length === 0) {
+          console.warn(`[Persistence Worker] DEPLOYMENT_CANCELLED ignored for deployment ${validDepId}: transition to CANCELLED not allowed from current status`);
+          break;
+        }
       }
       if (activeProjId) {
         const projRes = await client.query(
-          `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1 RETURNING domain`,
           [activeProjId]
         );
         const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);

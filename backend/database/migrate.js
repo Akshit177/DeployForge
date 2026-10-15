@@ -16,6 +16,19 @@ async function runMigrations() {
       ALTER TABLE deployments ADD COLUMN IF NOT EXISTS container_name VARCHAR(128);
       ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
+      UPDATE deployments SET status = 'RUNNING' WHERE UPPER(status) IN ('SUCCEEDED', 'RUNNING');
+      UPDATE deployments SET status = 'STARTING' WHERE UPPER(status) = 'DEPLOYING';
+      UPDATE deployments SET status = 'CANCELLED' WHERE UPPER(status) IN ('CANCELED', 'CANCELLED');
+      UPDATE deployments SET status = UPPER(status) WHERE status NOT IN ('INITIATED', 'QUEUED', 'CLONING', 'BUILDING', 'STARTING', 'RUNNING', 'FAILED', 'STOPPED', 'CANCELLED');
+
+      UPDATE projects SET status = 'RUNNING' WHERE UPPER(status) IN ('SUCCEEDED', 'RUNNING');
+      UPDATE projects SET status = 'CANCELLED' WHERE UPPER(status) IN ('CANCELED', 'CANCELLED');
+      UPDATE projects SET status = UPPER(status);
+      ALTER TABLE projects ALTER COLUMN status SET DEFAULT 'QUEUED';
+
+      ALTER TABLE deployments DROP CONSTRAINT IF EXISTS chk_deployments_status;
+      ALTER TABLE deployments ADD CONSTRAINT chk_deployments_status CHECK (status IN ('INITIATED', 'QUEUED', 'CLONING', 'BUILDING', 'STARTING', 'RUNNING', 'FAILED', 'STOPPED', 'CANCELLED'));
+
       DO $$
       DECLARE
           r RECORD;

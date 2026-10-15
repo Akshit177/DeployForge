@@ -138,15 +138,15 @@ async function runTestSuite() {
     });
     assert(patchAttempt.status === 404, "PATCH /api/deployments/:id/status returns 404 (removed)");
 
-    // Simulate worker/consumer updating durable state to Running
+    // Simulate worker/consumer updating durable state to RUNNING
     await pool.query(
       `UPDATE deployments
-       SET status = 'Running', duration_seconds = 48, container_id = 'cont-12345-abc', updated_at = NOW()
+       SET status = 'RUNNING', duration_seconds = 48, container_id = 'cont-12345-abc', updated_at = NOW()
        WHERE id = $1`,
       [deployId1]
     );
     await pool.query(
-      `UPDATE projects SET status = 'Running', updated_at = NOW() WHERE id = $1`,
+      `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
       [projectId]
     );
 
@@ -163,7 +163,7 @@ async function runTestSuite() {
       headers: { Cookie: tokenCookieA },
     });
     const projectCheckData = await projectCheck.json();
-    assert(projectCheckData.project.status === "Running", "Parent project status synced to Running");
+    assert(projectCheckData.project.status === "RUNNING", "Parent project status synced to Running");
 
     // 9. Cancel the second deployment
     const cancelRes = await fetch(`${baseUrl}/api/deployments/${deployId2}/cancel`, {
@@ -172,7 +172,7 @@ async function runTestSuite() {
     });
     assert(cancelRes.status === 200, "POST /api/deployments/:id/cancel returns 200");
     const cancelData = await cancelRes.json();
-    assert(cancelData.deployment.status === "Cancelled", "Deployment status set to Cancelled");
+    assert(cancelData.deployment.status === "CANCELLED", "Deployment status set to Cancelled");
 
     // 10. Cross-tenant isolation: User B cannot access User A's deployments
     const userBEmail = `deploy_user_b_${Date.now()}@test.com`;

@@ -8,6 +8,7 @@ const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { getDeploymentHotState, setDeploymentHotState, deleteDeploymentHotState } = require("../services/hotState.js");
 const { stopContainer, removeContainer } = require("../services/dockerClient.js");
 const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
+const { canTransition, normalizeStatus } = require("../services/statusMachine.js");
 
 const router = express.Router();
 
@@ -50,8 +51,7 @@ function formatDuration(seconds) {
 
 function formatDeployment(d) {
   const numStr = String(d.deployment_number || 1);
-  const status = d.status === "Succeeded" ? "Running" : d.status || "Queued";
-  const displayState = status === "Running" ? "Succeeded" : status;
+  const status = normalizeStatus(d.status || "QUEUED");
 
   return {
     id: d.id,
@@ -69,13 +69,13 @@ function formatDeployment(d) {
     commit_hash: d.commit_hash || "HEAD",
     branch: d.branch || "main",
     status: status,
-    state: displayState,
+    state: status,
     trigger: d.trigger || "manual",
     environment: d.environment || "production",
     url: d.url || d.project_domain || "",
     duration_seconds: d.duration_seconds || 0,
     duration: formatDuration(d.duration_seconds),
-    serving: status === "Running",
+    serving: status === "RUNNING",
     container_id: d.container_id || null,
     error_message: d.error_message || null,
     created_at: d.created_at,
@@ -123,7 +123,7 @@ router.get("/", parsePagination, async (req, res) => {
     }
 
     if (status) {
-      params.push(status);
+      params.push(normalizeStatus(status));
       query += ` AND d.status = $${params.length}`;
     }
 
@@ -379,8 +379,7 @@ router.post("/:id/cancel", async (req, res) => {
     }
 
     const current = check.rows[0];
-    const normStatus = (current.status || "").toUpperCase();
-    if (normStatus === "RUNNING" || normStatus === "FAILED" || normStatus === "CANCELLED" || normStatus === "STOPPED") {
+    if (!canTransition(current.status, "CANCELLED")) {
       return res.status(400).json({
         message: `Deployment cannot be cancelled because its current status is "${current.status}".`,
       });
@@ -388,14 +387,14 @@ router.post("/:id/cancel", async (req, res) => {
 
     const cancelRes = await pool.query(
       `UPDATE deployments
-       SET status = 'Cancelled', error_message = 'Deployment cancelled by user.', updated_at = NOW()
+       SET status = 'CANCELLED', error_message = 'Deployment cancelled by user.', updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
       [current.id]
     );
 
     await pool.query(
-      `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
+      `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1`,
       [current.project_id]
     );
 
@@ -452,17 +451,22 @@ router.post("/:id/stop", async (req, res) => {
     }
 
     const current = check.rows[0];
+    if (!canTransition(current.status, "STOPPED")) {
+      return res.status(400).json({
+        message: `Deployment cannot be stopped because its current status is "${current.status}".`,
+      });
+    }
 
     const stopRes = await pool.query(
       `UPDATE deployments
-       SET status = 'Stopped', updated_at = NOW()
+       SET status = 'STOPPED', updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
       [current.id]
     );
 
     await pool.query(
-      `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
+      `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1`,
       [current.project_id]
     );
 

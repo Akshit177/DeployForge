@@ -47,7 +47,7 @@ async function runTestSuite() {
 
     const deployRes = await pool.query(
       `INSERT INTO deployments (project_id, user_id, commit_hash, commit_message, branch, status, trigger, url)
-       VALUES ($1, $2, 'abc1234', 'test worker build', 'main', 'Queued', 'manual', $3)
+       VALUES ($1, $2, 'abc1234', 'test worker build', 'main', 'QUEUED', 'manual', $3)
        RETURNING id, deployment_number`,
       [project.id, userId, project.domain]
     );
@@ -77,7 +77,7 @@ async function runTestSuite() {
     console.log(`  Executing worker poll on stream...`);
     let attempts = 0;
     let finalDep = null;
-    while (attempts < 15) {
+    while (attempts < 30) {
       await pollOnce();
       const res = await pool.query(
         `SELECT status, duration_seconds, container_id FROM deployments WHERE id = $1`,

@@ -361,3 +361,42 @@
 - **Verification result:** VERIFIED — 68/68 C++ tests passing, 21/21 backend test suites passing (100%), frontend Vite build clean.
 - **Anything deferred:** None.
 
+### F-07: Status vocabulary drift, no state machine, wrong serving
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Created canonical lifecycle state machine in `backend/services/statusMachine.js`:
+    - Defined canonical uppercase enum `DEPLOYMENT_STATUSES`: `['INITIATED', 'QUEUED', 'CLONING', 'BUILDING', 'STARTING', 'RUNNING', 'FAILED', 'STOPPED', 'CANCELLED']`.
+    - Defined terminal statuses: `['FAILED', 'STOPPED', 'CANCELLED']`.
+    - Defined `ALLOWED_TRANSITIONS` state table, idempotency handling, and forward progression rules.
+    - Exported `canTransition`, `getAllowedPreviousStatuses`, `normalizeStatus`, `isValidStatus`, and `isTerminalStatus`.
+  - Added PostgreSQL `CHECK (status IN ('INITIATED', 'QUEUED', 'CLONING', 'BUILDING', 'STARTING', 'RUNNING', 'FAILED', 'STOPPED', 'CANCELLED'))` constraint `chk_deployments_status` to `backend/database/schema.sql`.
+  - Updated `backend/database/migrate.js` to normalize any legacy or lowercase status rows to uppercase (e.g. `succeeded` -> `RUNNING`) and idempotently add `chk_deployments_status`.
+  - Refactored `backend/routes/deployments.js`:
+    - `formatDeployment` now outputs uppercase canonical status without title-casing or vocabulary swapping.
+    - Set `serving = (status === 'RUNNING')` (eliminating `succeeded` drift).
+    - Normalized `status` query parameter in `GET /api/deployments`.
+    - Enforced transition validation via `canTransition()` on `POST /:id/cancel` and `POST /:id/stop` (returning 400 on invalid transitions) and persisted canonical uppercase `CANCELLED` and `STOPPED`.
+  - Guarded `backend/workers/persistenceWorker.js` against late and out-of-order events using `getAllowedPreviousStatuses()` and SQL transition guards (`status = ANY($allowed)`), preventing late completion events from resurrecting cancelled/stopped/failed deployments.
+  - Updated frontend `frontend/src/components/common/StatusBadge.jsx` to recognize uppercase canonical statuses including `CANCELLED` and `INITIATED`.
+  - Added test suite `backend/tests/status_machine.test.js` covering unit state machine transitions, persistence worker late-event resilience, and DB CHECK constraint enforcement; wired into `backend/package.json` test script.
+- **Files touched:**
+  - `backend/services/statusMachine.js`
+  - `backend/database/schema.sql`
+  - `backend/database/migrate.js`
+  - `backend/routes/deployments.js`
+  - `backend/workers/persistenceWorker.js`
+  - `frontend/src/components/common/StatusBadge.jsx`
+  - `backend/package.json`
+  - `backend/tests/status_machine.test.js`
+  - `backend/tests/deployments_api.test.js`
+  - `backend/tests/queue_worker.test.js`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/status_machine.test.js`: 8 tests (legal transitions, idempotent self-transitions, invalid jumps/regressions, terminal state immutability, case normalization, previous status computation, persistence worker late event guard, and PostgreSQL CHECK constraint validation).
+  - `backend/tests/deployments_api.test.js`: Updated assertions for uppercase status vocabulary (`RUNNING`, `CANCELLED`).
+  - `backend/tests/queue_worker.test.js`: Updated deployment seed to canonical `QUEUED`.
+- **Verification result:** VERIFIED — 22/22 backend test suites passing (100%), 68/68 C++ tests passing, frontend Vite build clean.
+- **Anything deferred:** None.
+
+
