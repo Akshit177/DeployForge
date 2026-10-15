@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, memo } from "react";
 import { fetchProjects } from "../services/projectService.js";
 import { fetchLogs, connectLogStream } from "../services/logService.js";
 import {
@@ -11,21 +11,64 @@ import {
   TerminalIcon,
   SpinnerIcon,
   PlusIcon,
+  CopyIcon,
 } from "../components/common/TechIcons.jsx";
 
-const MAX_LOG_BUFFER = 400;
+const MAX_LOG_BUFFER = 1000;
 
-export default function LogsPage({ navigate }) {
+const LogRowItem = memo(function LogRowItem({ log, searchQuery }) {
+  const level = (log.level || "INFO").toLowerCase();
+  return (
+    <div className={`console-log-row term-log-row log-${level} log-lvl-${level}`}>
+      <time className="log-col-time log-timestamp">{log.time}</time>
+      <span className={`log-col-badge log-level-badge lvl-${level}`}>[{(log.level || "INFO").toUpperCase()}]</span>
+      <span className="log-col-msg log-text-content">
+        {highlightMatch(log.text || log.message, searchQuery)}
+      </span>
+    </div>
+  );
+});
+
+function highlightMatch(text, query) {
+  if (!query || !query.trim() || !text) return text;
+  const q = query.trim();
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = String(text).split(new RegExp(`(${escaped})`, "gi"));
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    part.toLowerCase() === q.toLowerCase() ? (
+      <mark
+        key={i}
+        className="search-highlight"
+        style={{
+          backgroundColor: "rgba(234, 179, 8, 0.35)",
+          color: "#fef08a",
+          borderRadius: "2px",
+          padding: "0 2px",
+        }}
+      >
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  );
+}
+
+export default function LogsPage({ navigate, searchParams }) {
   const [projects, setProjects] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const initialProjectId = searchParams?.get("project_id") || searchParams?.get("projectId") || "";
+  const [selectedProjectId, setSelectedProjectId] = useState(initialProjectId);
   const [isLive, setIsLive] = useState(true);
   const [filterLevel, setFilterLevel] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
+  const [copied, setCopied] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [streamConnected, setStreamConnected] = useState(false);
   const scrollContainerRef = useRef(null);
+  const isAutoScrollPausedRef = useRef(false);
 
   // 1. Fetch user projects to populate project selector
   useEffect(() => {
@@ -39,23 +82,33 @@ export default function LogsPage({ navigate }) {
       .catch((err) => console.warn("Failed to load projects for logs:", err));
   }, []);
 
-  // 2. Fetch historical logs and connect live SSE stream
+  // 2. Fetch historical logs and connect live SSE stream with AbortController cleanup
   useEffect(() => {
+    const abortCtrl = new AbortController();
     let cleanupStream = null;
     setLoading(true);
     setStreamConnected(false);
 
     const loadHistorical = async () => {
       try {
-        const historical = await fetchLogs({
-          project_id: selectedProjectId || undefined,
-          limit: 150,
-        });
-        setLogs(historical.slice(-MAX_LOG_BUFFER));
+        const historical = await fetchLogs(
+          {
+            project_id: selectedProjectId || undefined,
+            limit: 150,
+          },
+          { signal: abortCtrl.signal }
+        );
+        if (!abortCtrl.signal.aborted) {
+          setLogs(historical.slice(-MAX_LOG_BUFFER));
+        }
       } catch (err) {
-        console.warn("Could not fetch historical logs:", err.message);
+        if (err.name !== "AbortError") {
+          console.warn("Could not fetch historical logs:", err.message);
+        }
       } finally {
-        setLoading(false);
+        if (!abortCtrl.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
@@ -66,6 +119,7 @@ export default function LogsPage({ navigate }) {
         { project_id: selectedProjectId || undefined },
         {
           onInit: (initialBatch) => {
+            if (abortCtrl.signal.aborted) return;
             setStreamConnected(true);
             if (Array.isArray(initialBatch) && initialBatch.length > 0) {
               setLogs((prev) => {
@@ -76,6 +130,7 @@ export default function LogsPage({ navigate }) {
             }
           },
           onLog: (newEntry) => {
+            if (abortCtrl.signal.aborted) return;
             setStreamConnected(true);
             setLogs((prev) => {
               if (prev.some((l) => l.id === newEntry.id)) return prev;
@@ -83,13 +138,16 @@ export default function LogsPage({ navigate }) {
             });
           },
           onError: () => {
-            setStreamConnected(false);
+            if (!abortCtrl.signal.aborted) {
+              setStreamConnected(false);
+            }
           },
         }
       );
     }
 
     return () => {
+      abortCtrl.abort();
       if (cleanupStream) {
         cleanupStream();
       }
@@ -101,16 +159,18 @@ export default function LogsPage({ navigate }) {
     if (!scrollContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
-    if (!isAtBottom && autoScroll) {
-      setAutoScroll(false);
-    } else if (isAtBottom && !autoScroll) {
-      setAutoScroll(true);
+    if (!isAtBottom) {
+      isAutoScrollPausedRef.current = true;
+      if (autoScroll) setAutoScroll(false);
+    } else {
+      isAutoScrollPausedRef.current = false;
+      if (!autoScroll) setAutoScroll(true);
     }
   };
 
   // Auto-scroll follow
   useEffect(() => {
-    if (autoScroll && scrollContainerRef.current) {
+    if (autoScroll && !isAutoScrollPausedRef.current && scrollContainerRef.current) {
       scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
   }, [logs, autoScroll]);
@@ -146,6 +206,13 @@ export default function LogsPage({ navigate }) {
 
   const handleClear = () => {
     setLogs([]);
+  };
+
+  const handleCopy = () => {
+    const content = filteredLogs.map((l) => `${l.time} [${(l.level || "INFO").toUpperCase()}] ${l.text || l.message}`).join("\n");
+    navigator.clipboard?.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
@@ -191,6 +258,7 @@ export default function LogsPage({ navigate }) {
               type="button"
               className={`btn-secondary btn-sm ${!isLive ? "btn-resume" : ""}`}
               onClick={() => setIsLive(!isLive)}
+              aria-label={isLive ? "Pause live log streaming" : "Resume live log streaming"}
             >
               {isLive ? (
                 <>
@@ -220,6 +288,7 @@ export default function LogsPage({ navigate }) {
                   onClick={() => setFilterLevel(lvl)}
                   role="tab"
                   aria-selected={isSelected}
+                  aria-label={`Filter by ${lvl} level logs`}
                 >
                   {isSelected && <CheckIcon size={11} className="chip-check-svg" />}
                   <span>{lvl}</span>
@@ -229,7 +298,7 @@ export default function LogsPage({ navigate }) {
           </div>
 
           <div className="search-control-wrap search-w-260">
-            <SearchIcon size={14} className="search-icon" />
+            <SearchIcon size={14} className="search-icon" aria-hidden="true" />
             <input
               className="search-input"
               value={searchQuery}
@@ -243,9 +312,9 @@ export default function LogsPage({ navigate }) {
                 type="button"
                 className="search-clear-btn"
                 onClick={() => setSearchQuery("")}
-                aria-label="Clear search"
+                aria-label="Clear search query"
               >
-                <CloseIcon size={12} />
+                <CloseIcon size={12} aria-hidden="true" />
               </button>
             )}
           </div>
@@ -271,7 +340,15 @@ export default function LogsPage({ navigate }) {
               <input
                 type="checkbox"
                 checked={autoScroll}
-                onChange={(e) => setAutoScroll(e.target.checked)}
+                aria-label="Toggle terminal auto-scroll"
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setAutoScroll(checked);
+                  isAutoScrollPausedRef.current = !checked;
+                  if (checked && scrollContainerRef.current) {
+                    scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+                  }
+                }}
               />
               <span>Auto-scroll</span>
             </label>
@@ -279,8 +356,20 @@ export default function LogsPage({ navigate }) {
             <button
               type="button"
               className="term-action-btn"
+              onClick={handleCopy}
+              title="Copy filtered logs to clipboard"
+              aria-label="Copy filtered logs to clipboard"
+            >
+              <CopyIcon size={12} aria-hidden="true" />
+              <span>{copied ? "Copied!" : "Copy"}</span>
+            </button>
+
+            <button
+              type="button"
+              className="term-action-btn"
               onClick={handleClear}
               title="Clear visible logs"
+              aria-label="Clear visible terminal logs"
             >
               Clear
             </button>
@@ -290,8 +379,9 @@ export default function LogsPage({ navigate }) {
               className="term-action-btn"
               onClick={handleDownload}
               title="Download filtered logs"
+              aria-label="Download filtered logs as text file"
             >
-              <DownloadIcon size={12} />
+              <DownloadIcon size={12} aria-hidden="true" />
               <span>Download</span>
             </button>
           </div>
@@ -299,9 +389,13 @@ export default function LogsPage({ navigate }) {
 
         {/* Log Lines Stream Body */}
         <div
-          className="term-scroll-viewport"
+          className="console-output-scroll term-scroll-viewport"
           ref={scrollContainerRef}
           onScroll={handleScroll}
+          role="log"
+          aria-live="polite"
+          aria-label="Real-time build and runtime logs"
+          style={{ position: "relative" }}
         >
           {loading ? (
             <div className="term-loading-row">
@@ -325,20 +419,30 @@ export default function LogsPage({ navigate }) {
               )}
             </div>
           ) : filteredLogs.length > 0 ? (
-            filteredLogs.map((log) => {
-              const level = (log.level || "INFO").toLowerCase();
-              return (
-                <div key={log.id} className={`term-log-row log-${level}`}>
-                  <time className="log-timestamp">{log.time}</time>
-                  <span className={`log-level-badge lvl-${level}`}>[{(log.level || "INFO").toUpperCase()}]</span>
-                  <span className="log-text-content">{log.text || log.message}</span>
-                </div>
-              );
-            })
+            filteredLogs.map((log) => (
+              <LogRowItem key={log.id} log={log} searchQuery={searchQuery} />
+            ))
           ) : (
             <div className="term-empty-row">
               <p>No log records match your current filter criteria.</p>
             </div>
+          )}
+
+          {!autoScroll && (
+            <button
+              type="button"
+              className="term-jump-bottom-btn"
+              onClick={() => {
+                setAutoScroll(true);
+                isAutoScrollPausedRef.current = false;
+                if (scrollContainerRef.current) {
+                  scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+                }
+              }}
+              aria-label="Jump to bottom of logs"
+            >
+              Jump to bottom ↓
+            </button>
           )}
         </div>
       </div>

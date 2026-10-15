@@ -22,6 +22,39 @@ export default function AppShell({ path, navigate, children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [deploymentCount, setDeploymentCount] = useState(null);
 
+  // Auto-close mobile & tablet drawer on route change
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [path]);
+
+  // Close mobile drawer on Escape key and manage body scroll lock on small screens
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        setMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
+
+  // Global Cmd+K / Ctrl+K keyboard shortcut to toggle Command Palette
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdOpen((prev) => !prev);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   useEffect(() => {
     let isMounted = true;
     getCurrentUser()
@@ -104,7 +137,7 @@ export default function AppShell({ path, navigate, children }) {
   };
 
   return (
-    <div className="app-shell-container">
+    <div className="app-shell-container df-app-shell">
       <a className="skip-link" href="#main-content">
         Skip to main content
       </a>
@@ -119,15 +152,29 @@ export default function AppShell({ path, navigate, children }) {
       )}
 
       {/* Sidebar matching Figma specifications & Vercel precision */}
-      <aside className={`app-sidebar ${menuOpen ? "open" : ""}`} aria-label="Main sidebar navigation">
+      <aside className={`app-sidebar df-sidebar ${menuOpen ? "open df-sidebar--open" : ""}`} aria-label="Main sidebar navigation">
         <div className="sidebar-top">
           {/* Brand */}
-          <div className="sidebar-brand" onClick={() => handleNav("/projects")}>
+          <div
+            className="sidebar-brand"
+            onClick={() => handleNav("/projects")}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && handleNav("/projects")}
+            aria-label="DeployForge home, go to projects"
+          >
             <BrandLogo size={24} />
           </div>
 
           {/* Account Avatar Block */}
-          <div className="sidebar-account-block" onClick={() => handleNav("/settings")}>
+          <div
+            className="sidebar-account-block"
+            onClick={() => handleNav("/settings")}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && handleNav("/settings")}
+            aria-label="Account profile, go to settings"
+          >
             <div className="avatar-chip">
               <span className="avatar-initial">
                 {currentUser?.user_name ? currentUser.user_name.charAt(0).toUpperCase() : "A"}
@@ -254,11 +301,21 @@ export default function AppShell({ path, navigate, children }) {
               className="mobile-menu-btn"
               onClick={() => setMenuOpen(!menuOpen)}
               aria-label="Toggle navigation menu"
+              aria-expanded={menuOpen}
             >
               {menuOpen ? <CloseIcon size={18} /> : <MenuIcon size={18} />}
             </button>
             <div className="topbar-breadcrumb">
-              <span className="crumb-root" onClick={() => handleNav("/projects")}>DeployForge</span>
+              <span
+                className="crumb-root"
+                onClick={() => handleNav("/projects")}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && handleNav("/projects")}
+                aria-label="DeployForge home, go to projects"
+              >
+                DeployForge
+              </span>
               <span className="crumb-sep">/</span>
               <strong className="crumb-current">{getBreadcrumbTitle()}</strong>
             </div>

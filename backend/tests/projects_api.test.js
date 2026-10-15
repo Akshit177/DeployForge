@@ -85,6 +85,41 @@ async function runTestSuite() {
     });
     assert(invalidPost.status === 400, "POST /api/projects with short name returns 400 Bad Request");
 
+    // 5a. POST /api/projects with adversarial/invalid repoUrl returns 400
+    const invalidRepoPost = await fetch(`${baseUrl}/api/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
+      body: JSON.stringify({
+        name: "bad-repo-app",
+        repository_url: "https://github.com/acme/repo; touch /tmp/pwn",
+      }),
+    });
+    assert(invalidRepoPost.status === 400, "POST /api/projects with malicious repoUrl returns 400 Bad Request");
+
+    // 5b. POST /api/projects with branch starting with hyphen returns 400
+    const invalidBranchPost = await fetch(`${baseUrl}/api/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
+      body: JSON.stringify({
+        name: "bad-branch-app",
+        repository_url: "https://github.com/acme/forge-service",
+        branch: "--upload-pack=touch /tmp/pwn",
+      }),
+    });
+    assert(invalidBranchPost.status === 400, "POST /api/projects with flag injection branch returns 400 Bad Request");
+
+    // 5c. POST /api/projects with out-of-bounds port (< 1024) returns 400
+    const invalidPortPost = await fetch(`${baseUrl}/api/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
+      body: JSON.stringify({
+        name: "bad-port-app",
+        repository_url: "https://github.com/acme/forge-service",
+        port: 80, // Privileged port below 1024
+      }),
+    });
+    assert(invalidPortPost.status === 400, "POST /api/projects with port < 1024 returns 400 Bad Request");
+
     // 6. POST /api/projects creates project for User A
     const createRes = await fetch(`${baseUrl}/api/projects`, {
       method: "POST",

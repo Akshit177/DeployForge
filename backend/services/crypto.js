@@ -4,6 +4,9 @@ require("dotenv").config({ path: path.join(__dirname, "../.env") });
 require("dotenv").config();
 
 function getMasterKey() {
+  if (process.env.NODE_ENV === "production" && !process.env.ENCRYPTION_KEY && !process.env.JWT_SECRET) {
+    throw new Error("ENCRYPTION_KEY or JWT_SECRET is required in production environment");
+  }
   const seed = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET || "deployforge-vault-default-key-32b";
   return crypto.createHash("sha256").update(String(seed)).digest();
 }

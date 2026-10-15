@@ -64,6 +64,7 @@ services:
       APP_NETWORK: deployforge-apps
       WORKSPACE_BASE_PATH: /var/lib/deployforge/workspaces
       NGINX_UPSTREAMS_PATH: /app/nginx/conf.d/deployforge-upstreams.conf
+      EXECUTION_ENGINE: ${EXECUTION_ENGINE:-cpp}
       ENABLE_NODE_DEPLOYMENT_WORKER: ${ENABLE_NODE_DEPLOYMENT_WORKER:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

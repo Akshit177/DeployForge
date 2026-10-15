@@ -166,6 +166,16 @@ async function runTestSuite() {
     unregisterUpstreamRoute(testDomain);
     assert(resolveDomain(testDomain) === null, "Unregistered domain resolves to null");
 
+    // 8. DF-10: Serialized Concurrent Ingress Config Sync
+    const { syncNginxConfig, UPSTREAMS_CONF_FILE } = require("../services/nginxManager.js");
+    const fs = require("fs");
+    const concurrentWrites = Array.from({ length: 5 }, (_, i) =>
+      syncNginxConfig(`# Auto-generated upstream config batch ${i}\nupstream dummy_${i} { server 127.0.0.1:800${i}; }\n`)
+    );
+    const syncResults = await Promise.all(concurrentWrites);
+    assert(syncResults.every((r) => r.synced === true), "All 5 concurrent Nginx sync operations serialized cleanly");
+    assert(fs.existsSync(UPSTREAMS_CONF_FILE), "Active upstreams configuration exists without corrupt partial writes");
+
     console.log("==================================================");
     console.log(`  All Health & Routing tests passed! (${passed}/${passed})`);
     console.log("==================================================");

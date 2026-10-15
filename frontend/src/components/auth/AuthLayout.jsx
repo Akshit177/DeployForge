@@ -1,9 +1,13 @@
-import BrandMark from "./BrandMark.jsx";
+import BrandLogo from "../common/BrandLogo.jsx";
 
 export default function AuthLayout({ isRegistration = false, title, description, footer, children }) {
   return (
     <main className={`auth-wrapper${isRegistration ? " register-wrapper" : ""}`}>
-      <header className="auth-topbar"><a href="/" className="auth-brand" aria-label="DeployForge home"><BrandMark /><span>DeployForge</span></a></header>
+      <header className="auth-topbar">
+        <a href="/" className="auth-brand" aria-label="DeployForge home">
+          <BrandLogo size={28} />
+        </a>
+      </header>
       <section className="auth-intro">
         <span className="eyebrow">DEPLOYFORGE PLATFORM</span>
         <h1>{isRegistration ? "From source code. To something live." : "Deploy in an Instant"}</h1>

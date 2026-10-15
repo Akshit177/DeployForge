@@ -1,6 +1,7 @@
 import { useState } from "react";
 import BrandLogo from "../components/common/BrandLogo.jsx";
 import FormMessage from "../components/auth/FormMessage.jsx";
+import PasswordInput from "../components/auth/PasswordInput.jsx";
 import useAuthForm from "../hooks/useAuthForm.js";
 import { register } from "../services/authService.js";
 
@@ -8,7 +9,6 @@ export default function RegisterPage({ onAuthenticated, onNavigate }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
   const { message, messageType, isSubmitting, submit } = useAuthForm();
 
   async function handleSubmit(event) {
@@ -89,30 +89,17 @@ export default function RegisterPage({ onAuthenticated, onNavigate }) {
                 />
               </div>
 
-              <div className="form-field-group">
-                <div className="label-with-link">
-                  <label htmlFor="reg-password">Password</label>
-                  <button
-                    type="button"
-                    className="toggle-pw-btn"
-                    onClick={() => setShowPassword(!showPassword)}
-                  >
-                    {showPassword ? "Hide" : "Show"}
-                  </button>
-                </div>
-                <div className="password-input-wrap">
-                  <input
-                    id="reg-password"
-                    type={showPassword ? "text" : "password"}
-                    required
-                    minLength={8}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min. 8 characters"
-                    autoComplete="new-password"
-                  />
-                </div>
-              </div>
+              <PasswordInput
+                id="reg-password"
+                name="password"
+                label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Min. 8 characters"
+                autoComplete="new-password"
+                minLength={8}
+                required
+              />
 
               <button
                 type="submit"

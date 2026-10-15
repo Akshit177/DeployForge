@@ -1,4 +1,6 @@
-export async function fetchLogs(params = {}) {
+import apiClient, { buildApiUrl } from "./apiClient.js";
+
+export async function fetchLogs(params = {}, options = {}) {
   const query = new URLSearchParams();
   if (params.deployment_id) query.set("deployment_id", params.deployment_id);
   if (params.project_id) query.set("project_id", params.project_id);
@@ -7,15 +9,7 @@ export async function fetchLogs(params = {}) {
   if (params.since) query.set("since", params.since);
 
   const qs = query.toString() ? `?${query.toString()}` : "";
-  const response = await fetch(`/api/logs${qs}`, {
-    credentials: "same-origin",
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.message || `Failed to fetch logs: ${response.status}`);
-  }
-
+  const data = await apiClient.get(`/api/logs${qs}`, options);
   return data.logs || [];
 }
 
@@ -25,7 +19,7 @@ export function connectLogStream(params = {}, callbacks = {}) {
   if (params.project_id) query.set("project_id", params.project_id);
 
   const qs = query.toString() ? `?${query.toString()}` : "";
-  const eventSource = new EventSource(`/api/logs/stream${qs}`, {
+  const eventSource = new EventSource(buildApiUrl(`/api/logs/stream${qs}`), {
     withCredentials: true,
   });
 
@@ -61,3 +55,8 @@ export function connectLogStream(params = {}, callbacks = {}) {
     eventSource.close();
   };
 }
+
+export default {
+  fetchLogs,
+  connectLogStream,
+};

@@ -1,6 +1,6 @@
 const express = require("express");
 const { authenticateToken } = require("../middleware/auth.js");
-const { getRoutingTable, generateNginxConfig, resolveDomain, syncFromDatabase } = require("../services/proxyRouter.js");
+const { getRoutingTable, generateNginxConfig, resolveDomain, syncFromDatabase, registerUpstreamRoute } = require("../services/proxyRouter.js");
 const { checkProjectHealth } = require("../services/healthCheck.js");
 
 const router = express.Router();
@@ -64,6 +64,25 @@ router.get("/health/:projectId", authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("Health probe error:", err);
     return res.status(500).json({ message: "Failed to probe project health." });
+  }
+});
+
+/**
+ * PUT /api/routing/:domain
+ * Register or update an upstream route for a domain
+ */
+router.put("/:domain", authenticateToken, async (req, res) => {
+  const { domain } = req.params;
+  const routeInfo = req.body || {};
+  try {
+    const updated = registerUpstreamRoute(domain, routeInfo);
+    return res.status(200).json({
+      success: true,
+      route: updated,
+    });
+  } catch (err) {
+    console.error("Failed to update route:", err);
+    return res.status(500).json({ message: "Failed to update route." });
   }
 });
 

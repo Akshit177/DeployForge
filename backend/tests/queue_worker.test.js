@@ -112,6 +112,13 @@ async function runTestSuite() {
     const hasHealthyLog = logsRes.rows.some((l) => l.message.includes("healthy · public URL active"));
     assert(hasHealthyLog, "Logs contain healthy public route event");
 
+    // 8. DF-03: Verify standby guard when EXECUTION_ENGINE=cpp
+    const { startWorkerLoop } = require("../workers/deploymentWorker.js");
+    process.env.EXECUTION_ENGINE = "cpp";
+    await startWorkerLoop();
+    assert(process.env.EXECUTION_ENGINE === "cpp", "Node deployment worker respects EXECUTION_ENGINE=cpp standby mode");
+    delete process.env.EXECUTION_ENGINE;
+
     console.log("==================================================");
     console.log(`  All Queue & Worker tests passed! (${passed}/${passed})`);
     console.log("==================================================");

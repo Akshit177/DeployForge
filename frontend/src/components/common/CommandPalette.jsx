@@ -1,141 +1,225 @@
-import { useEffect, useState } from "react";
-import { fetchProjects } from "../../services/projectService.js";
+// frontend/src/components/common/CommandPalette.jsx
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { fetchProjects } from '../../services/projectService.js';
 import {
   ProjectsNavIcon,
   DeploymentsNavIcon,
   LogsNavIcon,
   SettingsNavIcon,
   PlusIcon,
-  SearchIcon,
   ExternalLinkIcon,
   DockerIcon,
-} from "./TechIcons.jsx";
+} from './TechIcons.jsx';
 
-export default function CommandPalette({ isOpen, onClose, navigate }) {
-  const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
+export default function CommandPalette({ isOpen, onClose, onNavigate, navigate, items = [] }) {
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
   const [userProjects, setUserProjects] = useState([]);
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+  const previousFocusRef = useRef(null);
 
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && items.length === 0) {
       fetchProjects()
         .then((data) => {
           if (Array.isArray(data)) setUserProjects(data);
         })
         .catch(() => {});
     }
-  }, [isOpen]);
+  }, [isOpen, items.length]);
 
-  const baseCommands = [
-    { label: "Go to Projects", path: "/projects", category: "Navigation", Icon: ProjectsNavIcon, shortcut: "G P" },
-    { label: "Import / New Project", path: "/projects/new", category: "Action", Icon: PlusIcon, shortcut: "N" },
-    { label: "View Deployments", path: "/deployments", category: "Navigation", Icon: DeploymentsNavIcon, shortcut: "G D" },
-    { label: "View Latest Deployment", path: "/deployments/detail", category: "Deployments", Icon: DeploymentsNavIcon, shortcut: "D" },
-    { label: "Live Runtime Logs", path: "/logs", category: "Navigation", Icon: LogsNavIcon, shortcut: "G L" },
-    { label: "Workspace Settings", path: "/settings", category: "Navigation", Icon: SettingsNavIcon, shortcut: "G S" },
-    { label: "Overview & Architecture", path: "/", category: "Information", Icon: ExternalLinkIcon, shortcut: "H" },
-  ];
+  const defaultCommands = useMemo(() => {
+    const base = [
+      { id: 'nav-projects', label: 'Go to Projects', path: '/projects', category: 'Navigation', Icon: ProjectsNavIcon, shortcut: 'G P' },
+      { id: 'act-new-project', label: 'Import / New Project', path: '/projects/new', category: 'Action', Icon: PlusIcon, shortcut: 'N' },
+      { id: 'nav-deployments', label: 'View Deployments', path: '/deployments', category: 'Navigation', Icon: DeploymentsNavIcon, shortcut: 'G D' },
+      { id: 'nav-detail', label: 'View Latest Deployment', path: '/deployments/detail', category: 'Deployments', Icon: DeploymentsNavIcon, shortcut: 'D' },
+      { id: 'nav-logs', label: 'Live Runtime Logs', path: '/logs', category: 'Navigation', Icon: LogsNavIcon, shortcut: 'G L' },
+      { id: 'nav-settings', label: 'Workspace Settings', path: '/settings', category: 'Navigation', Icon: SettingsNavIcon, shortcut: 'G S' },
+      { id: 'nav-home', label: 'Overview & Architecture', path: '/', category: 'Information', Icon: ExternalLinkIcon, shortcut: 'H' },
+    ];
 
-  const projectCommands = userProjects.map((p) => {
-    const rawState = (p.state || p.status || "Ready").toLowerCase();
-    const capState = rawState.charAt(0).toUpperCase() + rawState.slice(1);
-    return {
-      label: `Project: ${p.name}`,
-      path: `/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`,
-      category: "Projects",
-      Icon: DockerIcon,
-      meta: `${capState} · Port :${p.port || 3000}`,
-    };
-  });
+    const projectCmds = userProjects.map((p) => {
+      const rawState = (p.state || p.status || 'Ready').toLowerCase();
+      const capState = rawState.charAt(0).toUpperCase() + rawState.slice(1);
+      return {
+        id: `proj-${p.id || p.name}`,
+        label: `Project: ${p.name}`,
+        path: `/deployments/detail?project_id=${p.id}&project_name=${encodeURIComponent(p.name)}`,
+        category: 'Projects',
+        Icon: DockerIcon,
+        shortcut: `${capState} · :${p.port || 3000}`,
+      };
+    });
 
-  const commands = [...baseCommands, ...projectCommands];
+    return [...base, ...projectCmds];
+  }, [userProjects]);
 
-  const filtered = query.trim()
-    ? commands.filter(
-        (c) =>
-          c.label.toLowerCase().includes(query.toLowerCase()) ||
-          c.category.toLowerCase().includes(query.toLowerCase()) ||
-          (c.meta && c.meta.toLowerCase().includes(query.toLowerCase()))
-      )
-    : commands;
+  const sourceItems = items.length > 0 ? items : defaultCommands;
+
+  const filteredItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sourceItems;
+    return sourceItems.filter(
+      (item) =>
+        item.label.toLowerCase().includes(q) ||
+        (item.category && item.category.toLowerCase().includes(q)) ||
+        (item.keywords && item.keywords.toLowerCase().includes(q)) ||
+        (item.path && item.path.toLowerCase().includes(q))
+    );
+  }, [sourceItems, query]);
 
   useEffect(() => {
-    setSelectedIndex(0);
-  }, [query]);
+    setActiveIndex(0);
+  }, [query, isOpen]);
 
+  // Scroll active item into view
   useEffect(() => {
-    function handleKeyDown(e) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        onClose(!isOpen);
-      } else if (e.key === "Escape" && isOpen) {
-        onClose(false);
-      } else if (isOpen) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setSelectedIndex((prev) => (prev + 1) % Math.max(1, filtered.length));
-        } else if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setSelectedIndex((prev) => (prev - 1 + filtered.length) % Math.max(1, filtered.length));
-        } else if (e.key === "Enter" && filtered[selectedIndex]) {
-          e.preventDefault();
-          onClose(false);
-          navigate(filtered[selectedIndex].path);
-        }
+    if (isOpen && listRef.current) {
+      const activeEl = listRef.current.querySelector('.df-cmd-item--active, .cmd-item.selected');
+      if (activeEl && typeof activeEl.scrollIntoView === 'function') {
+        activeEl.scrollIntoView({ block: 'nearest' });
       }
     }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose, filtered, selectedIndex, navigate]);
+  }, [activeIndex, isOpen]);
+
+  useEffect(() => {
+    if (isOpen) {
+      previousFocusRef.current = document.activeElement;
+      document.body.style.overflow = 'hidden';
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } else {
+      document.body.style.overflow = '';
+      setQuery('');
+      if (previousFocusRef.current && typeof previousFocusRef.current.focus === 'function') {
+        previousFocusRef.current.focus();
+      }
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
+  const handleClose = () => {
+    if (typeof onClose === 'function') {
+      onClose(false);
+    }
+  };
+
+  const handleSelect = (item) => {
+    if (typeof onNavigate === 'function') {
+      onNavigate(item);
+    } else if (typeof navigate === 'function') {
+      navigate(item.path || item);
+    }
+    handleClose();
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      handleClose();
+      return;
+    }
+    if (filteredItems.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev + 1) % filteredItems.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev - 1 + filteredItems.length) % filteredItems.length);
+    } else if (e.key === 'Enter' && filteredItems[activeIndex]) {
+      e.preventDefault();
+      handleSelect(filteredItems[activeIndex]);
+    } else if (e.key === 'Tab') {
+      // Focus containment
+      e.preventDefault();
+      inputRef.current?.focus();
+    }
+  };
+
   return (
-    <div className="cmd-backdrop" onClick={() => onClose(false)} role="dialog" aria-modal="true" aria-label="Command Palette">
-      <div className="cmd-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="cmd-input-wrap">
-          <SearchIcon size={16} className="cmd-search-icon" />
+    <div
+      className="df-cmd-backdrop cmd-backdrop"
+      onClick={handleClose}
+      role="presentation"
+    >
+      <div
+        className="df-cmd-dialog cmd-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command Palette"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="df-cmd-search cmd-input-wrap">
           <input
-            autoFocus
-            className="cmd-input"
+            ref={inputRef}
+            type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Type a command or search workspace..."
+            placeholder="Type a command or search projects, deployments, logs..."
+            className="df-cmd-input cmd-input"
+            aria-label="Search workspace commands"
+            role="combobox"
+            aria-expanded="true"
+            aria-autocomplete="list"
+            aria-controls="cmd-listbox"
+            aria-activedescendant={
+              filteredItems[activeIndex]
+                ? `cmd-item-${filteredItems[activeIndex].id || activeIndex}`
+                : undefined
+            }
           />
-          <kbd className="cmd-esc" onClick={() => onClose(false)}>ESC</kbd>
+          <button
+            type="button"
+            className="df-kbd df-kbd--esc cmd-esc"
+            onClick={handleClose}
+            aria-label="Close command palette"
+          >
+            ESC
+          </button>
         </div>
 
-        <div className="cmd-list">
-          {filtered.length > 0 ? (
-            filtered.map((item, idx) => {
+        <ul className="df-cmd-list cmd-list" id="cmd-listbox" ref={listRef} role="listbox" aria-label="Command suggestions">
+          {filteredItems.length === 0 ? (
+            <li className="df-cmd-empty cmd-empty" role="option" aria-selected="false">
+              No matching commands or resources for "{query}"
+            </li>
+          ) : (
+            filteredItems.map((item, idx) => {
+              const isSelected = idx === activeIndex;
               const IconComp = item.Icon;
-              const isSelected = selectedIndex === idx;
+              const itemId = item.id || `item-${idx}`;
               return (
-                <button
-                  key={idx}
-                  className={`cmd-item ${isSelected ? "selected" : ""}`}
-                  onClick={() => {
-                    onClose(false);
-                    navigate(item.path);
-                  }}
-                  onMouseEnter={() => setSelectedIndex(idx)}
+                <li
+                  key={itemId}
+                  id={`cmd-item-${itemId}`}
+                  role="option"
+                  aria-selected={isSelected}
+                  className={`df-cmd-item cmd-item ${isSelected ? 'df-cmd-item--active selected' : ''}`.trim()}
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  onClick={() => handleSelect(item)}
                 >
-                  <span className="cmd-item-icon">
-                    <IconComp size={15} />
-                  </span>
-                  <span className="cmd-item-label">{item.label}</span>
-                  {item.meta && <span className="cmd-item-meta">{item.meta}</span>}
-                  <span className="cmd-item-tag">{item.category}</span>
-                  {item.shortcut && <kbd className="cmd-item-shortcut">{item.shortcut}</kbd>}
-                </button>
+                  {IconComp && (
+                    <span className="cmd-item-icon" aria-hidden="true" style={{ display: 'inline-flex', marginRight: '8px', color: 'var(--text-muted)' }}>
+                      <IconComp size={15} />
+                    </span>
+                  )}
+                  <span className="df-cmd-item__label cmd-item-label" style={{ flex: 1 }}>{item.label}</span>
+                  {item.category && <span className="cmd-item-tag" style={{ marginRight: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>{item.category}</span>}
+                  {item.shortcut && <kbd className="df-kbd cmd-item-shortcut">{item.shortcut}</kbd>}
+                </li>
               );
             })
-          ) : (
-            <div className="cmd-empty">No results found for “{query}”</div>
           )}
-        </div>
+        </ul>
 
-        <div className="cmd-footer">
+        <div className="cmd-footer" aria-hidden="true">
           <span>Navigate with <kbd>↑</kbd> <kbd>↓</kbd></span>
           <span>Select <kbd>↵</kbd></span>
           <span>Close <kbd>ESC</kbd></span>

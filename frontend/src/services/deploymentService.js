@@ -1,58 +1,40 @@
-async function request(endpoint, options = {}) {
-  const url = `/api/deployments${endpoint}`;
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
+import apiClient from "./apiClient.js";
 
-  const data = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    throw new Error(data.message || `Request failed with status ${response.status}`);
-  }
-
-  return data;
-}
-
-export async function fetchDeployments(params = {}) {
+export async function fetchDeployments(params = {}, options = {}) {
   const query = new URLSearchParams();
   if (params.project_id) query.set("project_id", params.project_id);
   if (params.status) query.set("status", params.status);
   if (params.limit) query.set("limit", params.limit);
 
   const qs = query.toString() ? `?${query.toString()}` : "";
-  const result = await request(qs);
+  const result = await apiClient.get(`/api/deployments${qs}`, options);
   return result.deployments || [];
 }
 
-export async function getDeployment(id) {
-  const result = await request(`/${id}`);
+export async function getDeployment(id, options = {}) {
+  const result = await apiClient.get(`/api/deployments/${id}`, options);
   return result.deployment;
 }
 
-export async function triggerDeployment(payload) {
-  const result = await request("", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export async function triggerDeployment(payload, options = {}) {
+  const result = await apiClient.post("/api/deployments", payload, options);
   return result.deployment;
 }
 
-export async function cancelDeployment(id) {
-  const result = await request(`/${id}/cancel`, {
-    method: "POST",
-  });
+export async function cancelDeployment(id, options = {}) {
+  const result = await apiClient.post(`/api/deployments/${id}/cancel`, null, options);
   return result.deployment;
 }
 
-export async function updateDeploymentStatus(id, payload) {
-  const result = await request(`/${id}/status`, {
-    method: "PATCH",
-    body: JSON.stringify(payload),
-  });
+export async function updateDeploymentStatus(id, payload, options = {}) {
+  const result = await apiClient.patch(`/api/deployments/${id}/status`, payload, options);
   return result.deployment;
 }
+
+export default {
+  fetchDeployments,
+  getDeployment,
+  triggerDeployment,
+  cancelDeployment,
+  updateDeploymentStatus,
+};

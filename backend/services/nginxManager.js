@@ -144,47 +144,92 @@ async function reloadNginx() {
   }
 }
 
+let syncQueue = Promise.resolve();
+
 /**
- * Synchronize the current proxyRouter routing table to disk and reload Nginx
+ * Synchronize the current proxyRouter routing table to disk and reload Nginx.
+ * Serialized via an in-memory promise queue with atomic temp-file write + rename
+ * to prevent corrupted or truncated reads under concurrent deployment reloads.
  * @param {string} [nginxConfigContent] - Pre-rendered config string, or will generate from proxyRouter
- * @returns {Promise<{ synced: boolean, path: string, valid: boolean, reloaded: boolean }>}
+ * @returns {Promise<{ synced: boolean, path: string, valid: boolean, reloaded: boolean, error?: string }>}
  */
 async function syncNginxConfig(nginxConfigContent) {
-  ensureNginxStructure();
+  const executeSync = async () => {
+    ensureNginxStructure();
 
-  let configContent = nginxConfigContent;
-  if (!configContent) {
-    const { generateNginxConfig } = require("./proxyRouter.js");
-    configContent = generateNginxConfig();
-  }
-
-  try {
-    fs.writeFileSync(UPSTREAMS_CONF_FILE, configContent, "utf-8");
-
-    const validation = await validateNginxConfig();
-    let reloaded = false;
-
-    if (validation.valid) {
-      const reloadResult = await reloadNginx();
-      reloaded = reloadResult.reloaded;
-    } else {
-      console.warn("Nginx configuration validation failed:", validation.error);
+    let configContent = nginxConfigContent;
+    if (!configContent) {
+      const { generateNginxConfig } = require("./proxyRouter.js");
+      configContent = generateNginxConfig();
     }
 
-    return {
-      synced: true,
-      path: UPSTREAMS_CONF_FILE,
-      valid: validation.valid,
-      reloaded,
-    };
-  } catch (err) {
-    console.warn("Failed to synchronize Nginx configuration:", err.message);
-    return {
-      synced: false,
-      path: UPSTREAMS_CONF_FILE,
-      error: err.message,
-    };
-  }
+    const tmpPath = `${UPSTREAMS_CONF_FILE}.tmp`;
+    let prevConfig = null;
+
+    try {
+      if (fs.existsSync(UPSTREAMS_CONF_FILE)) {
+        prevConfig = await fs.promises.readFile(UPSTREAMS_CONF_FILE, "utf-8");
+      }
+    } catch (_) {}
+
+    try {
+      // 1. Write updated upstream configuration to .tmp file
+      await fs.promises.writeFile(tmpPath, configContent, "utf-8");
+
+      // 2. POSIX atomic rename over active upstream config
+      await fs.promises.rename(tmpPath, UPSTREAMS_CONF_FILE);
+
+      // 3. Syntax validation
+      const validation = await validateNginxConfig();
+      let reloaded = false;
+
+      if (validation.valid) {
+        const reloadResult = await reloadNginx();
+        reloaded = Boolean(reloadResult.reloaded);
+      } else {
+        console.warn("Nginx configuration validation failed:", validation.error);
+        // Rollback to previous config if it existed
+        if (prevConfig !== null) {
+          try {
+            await fs.promises.writeFile(tmpPath, prevConfig, "utf-8");
+            await fs.promises.rename(tmpPath, UPSTREAMS_CONF_FILE);
+            console.warn("Rolled back Nginx configuration to last known good state.");
+          } catch (rollbackErr) {
+            console.error("Failed to rollback Nginx configuration:", rollbackErr.message);
+          }
+        }
+      }
+
+      return {
+        synced: true,
+        path: UPSTREAMS_CONF_FILE,
+        valid: validation.valid,
+        reloaded,
+        error: validation.valid ? undefined : validation.error,
+      };
+    } catch (err) {
+      // Clean up temp file if still present
+      try {
+        if (fs.existsSync(tmpPath)) {
+          await fs.promises.unlink(tmpPath);
+        }
+      } catch (_) {}
+
+      console.warn("Failed to synchronize Nginx configuration:", err.message);
+      return {
+        synced: false,
+        path: UPSTREAMS_CONF_FILE,
+        valid: false,
+        reloaded: false,
+        error: err.message,
+      };
+    }
+  };
+
+  // Enqueue to guarantee serialized execution
+  const currentSync = syncQueue.then(executeSync, executeSync);
+  syncQueue = currentSync.catch(() => {});
+  return currentSync;
 }
 
 module.exports = {

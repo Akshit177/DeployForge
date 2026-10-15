@@ -1,42 +1,62 @@
-async function sendAuthRequest(endpoint, payload, method = "POST") {
-  const options = {
-    method,
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-  };
-  if (payload) {
-    options.body = JSON.stringify(payload);
+import apiClient from "./apiClient.js";
+
+export async function login(credentials, options = {}) {
+  const result = await apiClient.post("/api/auth/login", credentials, {
+    skipAuthRedirect: true,
+    ...options,
+  });
+  if (result && result.token) {
+    try {
+      localStorage.setItem("df_token", result.token);
+      localStorage.setItem("token", result.token);
+    } catch (_) {}
   }
-
-  const response = await fetch(`/api/auth/${endpoint}`, options);
-  const result = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    throw new Error(result.message || "The request could not be completed.");
-  }
-
   return result;
 }
 
-export function login(credentials) {
-  return sendAuthRequest("login", credentials);
-}
-
-export function register(account) {
-  return sendAuthRequest("register", account);
-}
-
-export function logout() {
-  return sendAuthRequest("logout", null, "POST");
-}
-
-export async function getCurrentUser() {
-  const response = await fetch("/api/auth/me", {
-    credentials: "same-origin",
+export async function register(account, options = {}) {
+  const result = await apiClient.post("/api/auth/register", account, {
+    skipAuthRedirect: true,
+    ...options,
   });
-  if (!response.ok) {
+  if (result && result.token) {
+    try {
+      localStorage.setItem("df_token", result.token);
+      localStorage.setItem("token", result.token);
+    } catch (_) {}
+  }
+  return result;
+}
+
+export async function logout(options = {}) {
+  try {
+    await apiClient.post("/api/auth/logout", null, {
+      skipAuthRedirect: true,
+      ...options,
+    });
+  } finally {
+    try {
+      localStorage.removeItem("df_token");
+      localStorage.removeItem("token");
+    } catch (_) {}
+  }
+}
+
+export async function getCurrentUser(options = {}) {
+  try {
+    const data = await apiClient.get("/api/auth/me", {
+      skipAuthRedirect: true,
+      ...options,
+    });
+    return data.user || null;
+  } catch (_) {
     return null;
   }
-  const data = await response.json();
-  return data.user || null;
 }
+
+export default {
+  login,
+  register,
+  logout,
+  getCurrentUser,
+};

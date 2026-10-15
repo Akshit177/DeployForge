@@ -185,6 +185,48 @@ async function runTestSuite() {
       `Manual deployment successfully reached RUNNING (status: ${finalStatus})`
     );
 
+    // 7. DF-11: Dead-Letter Handling & Bounded Retry Limit
+    console.log("  Testing bounded retries and dead-letter handling for failing outbox events...");
+    const queue = require("../services/queue.js");
+    const originalPublish = queue.publishDeploymentJob;
+    queue.publishDeploymentJob = async (payload) => {
+      if (payload.is_poison) {
+        throw new Error("Simulated Redis transport failure");
+      }
+      return originalPublish(payload);
+    };
+
+    const poisonDepRes = await pool.query(
+      `INSERT INTO deployments (project_id, user_id, status, branch, commit_message)
+       VALUES ($1, $2, 'INITIATED', 'main', 'Poison test')
+       RETURNING id`,
+      [project.id, initialDep.user_id]
+    );
+    const poisonDepId = poisonDepRes.rows[0].id;
+
+    // Insert outbox event with retry_count = 4 (1 attempt below MAX_RETRIES = 5)
+    const poisonEventRes = await pool.query(
+      `INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload, status, retry_count)
+       VALUES ('DEPLOYMENT', $1, 'DEPLOYMENT_INITIATED', $2, 'PENDING', 4)
+       RETURNING id`,
+      [poisonDepId, JSON.stringify({ is_poison: true, deployment_id: poisonDepId, project_id: project.id, user_id: initialDep.user_id })]
+    );
+    const poisonEventId = poisonEventRes.rows[0].id;
+
+    // Trigger relay - failure increments retry_count from 4 to 5, transitioning to FAILED (DEAD_LETTER)
+    await relayPendingEvents();
+
+    const deadEvent = (await pool.query(`SELECT * FROM outbox_events WHERE id = $1`, [poisonEventId])).rows[0];
+    assert(deadEvent.status === "FAILED", "Poison-pill outbox event transitioned to FAILED status upon reaching max retries");
+    assert(deadEvent.retry_count === 5, "Poison-pill retry_count incremented to 5");
+    assert(deadEvent.error_message.includes("Exceeded max retries"), "Outbox records exceeded max retries diagnostic message");
+
+    const deadDep = (await pool.query(`SELECT * FROM deployments WHERE id = $1`, [poisonDepId])).rows[0];
+    assert(deadDep.status === "FAILED", "Associated deployment transitioned to FAILED status upon outbox dead-lettering");
+
+    // Restore queue.publishDeploymentJob
+    queue.publishDeploymentJob = originalPublish;
+
     console.log("================================================================================");
     console.log(`  🎉 Phase A Outbox & Lifecycle Tests Passed! (${passed}/${passed})`);
     console.log("================================================================================");

@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, memo } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
+import FormMessage from "../components/common/FormMessage.jsx";
 import { fetchDeployments, getDeployment, cancelDeployment } from "../services/deploymentService.js";
 import { fetchLogs, connectLogStream } from "../services/logService.js";
+import { verifyDomainHealth, resolveRoute } from "../services/routingService.js";
 import {
   ArrowLeftIcon,
   ExternalLinkIcon,
@@ -23,6 +25,16 @@ import {
   CloseIcon,
 } from "../components/common/TechIcons.jsx";
 
+const LogLineItem = memo(function LogLineItem({ log }) {
+  const level = (log.level || "INFO").toLowerCase();
+  return (
+    <div className={`log-line-item log-${log.type || level}`}>
+      <span className="log-time-cell">{log.time || "—"}</span>
+      <span className="log-msg-cell">{log.text || log.message}</span>
+    </div>
+  );
+});
+
 const STAGE_ORDER = ["initiated", "queued", "cloning", "building", "starting", "running"];
 
 const STAGE_CONFIGS = [
@@ -43,104 +55,204 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
   const [copiedContainerId, setCopiedContainerId] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
+  // Routing health state
+  const [domainHealth, setDomainHealth] = useState(null);
+  const [resolvedRoute, setResolvedRoute] = useState(null);
+
   // Terminal log controls
   const [logFilterQuery, setLogFilterQuery] = useState("");
   const [logLevelFilter, setLogLevelFilter] = useState("ALL");
   const [autoScroll, setAutoScroll] = useState(true);
 
   const logsEndRef = useRef(null);
+  const terminalBodyRef = useRef(null);
+  const isAutoScrollPausedRef = useRef(false);
   const pollTimerRef = useRef(null);
+  const pollAbortRef = useRef(null);
 
   const targetId = searchParams?.get("id") || new URLSearchParams(window.location.search).get("id");
   const targetProjectId = searchParams?.get("project_id") || new URLSearchParams(window.location.search).get("project_id");
 
-  const loadDeploymentData = async (isBackground = false) => {
+  const loadDeploymentData = async (isBackground = false, signal = null) => {
     try {
       if (!isBackground) setLoading(true);
       setError(null);
       if (targetId) {
-        const data = await getDeployment(targetId);
-        setDeployment(data);
+        const data = await getDeployment(targetId, { signal });
+        if (!signal?.aborted) setDeployment(data);
       } else if (targetProjectId) {
-        const list = await fetchDeployments({ project_id: targetProjectId, limit: 1 });
-        if (list.length > 0) {
+        const list = await fetchDeployments({ project_id: targetProjectId, limit: 1 }, { signal });
+        if (!signal?.aborted && list.length > 0) {
           setDeployment(list[0]);
         }
       } else {
-        const list = await fetchDeployments({ limit: 1 });
-        if (list.length > 0) {
+        const list = await fetchDeployments({ limit: 1 }, { signal });
+        if (!signal?.aborted && list.length > 0) {
           setDeployment(list[0]);
         }
       }
     } catch (err) {
-      console.warn("Could not load deployment detail:", err.message);
-      if (!isBackground) setError(err.message);
+      if (err.name !== "AbortError") {
+        console.warn("Could not load deployment detail:", err.message);
+        if (!isBackground) setError(err.message);
+      }
     } finally {
-      if (!isBackground) setLoading(false);
+      if (!isBackground && !signal?.aborted) setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadDeploymentData();
+    const abortCtrl = new AbortController();
+    loadDeploymentData(false, abortCtrl.signal);
     return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      abortCtrl.abort();
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
+      }
     };
   }, [targetId, targetProjectId]);
 
-  // Real-time polling while status is active
+  // Real-time polling while status is active with AbortController and visibility pausing
   useEffect(() => {
     if (!deployment) return;
     const s = (deployment.status || deployment.state || "").toLowerCase().trim();
     const isActive = ["initiated", "queued", "cloning", "building", "starting", "deploying"].includes(s);
 
-    if (isActive) {
-      if (!pollTimerRef.current) {
-        pollTimerRef.current = setInterval(() => {
-          loadDeploymentData(true);
-        }, 2500);
-      }
-    } else {
+    if (!isActive) {
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
+        clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
+      }
+      return;
     }
 
+    let isPolling = true;
+
+    const schedulePoll = () => {
+      if (!isPolling) return;
+      pollTimerRef.current = setTimeout(async () => {
+        if (!isPolling) return;
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+          schedulePoll();
+          return;
+        }
+
+        if (pollAbortRef.current) {
+          pollAbortRef.current.abort();
+        }
+        pollAbortRef.current = new AbortController();
+
+        try {
+          await loadDeploymentData(true, pollAbortRef.current.signal);
+        } finally {
+          if (isPolling) {
+            schedulePoll();
+          }
+        }
+      }, 2500);
+    };
+
+    schedulePoll();
+
     return () => {
+      isPolling = false;
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
+        clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
+      }
     };
-  }, [deployment]);
+  }, [deployment?.status, deployment?.state]);
 
-  // Fetch and stream logs
+  // Fetch and stream logs with AbortController cleanup and 1,000 line window cap
   useEffect(() => {
     if (!deployment?.id) return;
+    const abortCtrl = new AbortController();
 
-    fetchLogs({ deployment_id: deployment.id })
+    fetchLogs({ deployment_id: deployment.id }, { signal: abortCtrl.signal })
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setLogs(data);
+        if (!abortCtrl.signal.aborted && Array.isArray(data) && data.length > 0) {
+          setLogs(data.slice(-1000));
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (err.name !== "AbortError") {
+          console.warn("Could not fetch deployment logs:", err.message);
+        }
+      });
 
     const cleanup = connectLogStream(
       { deployment_id: deployment.id },
       {
         onLog: (newEntry) => {
-          setLogs((prev) => [...prev, newEntry]);
+          if (!abortCtrl.signal.aborted) {
+            setLogs((prev) => [...prev, newEntry].slice(-1000));
+          }
         },
       }
     );
 
-    return () => cleanup();
+    return () => {
+      abortCtrl.abort();
+      cleanup();
+    };
   }, [deployment?.id]);
 
-  // Auto-scroll logs
+  // Ingress Domain routing health probes
   useEffect(() => {
-    if (autoScroll && logsEndRef.current) {
+    const projId = deployment?.project_id || targetProjectId;
+    if (!projId) return;
+    const abortCtrl = new AbortController();
+
+    verifyDomainHealth(projId, { signal: abortCtrl.signal })
+      .then((data) => {
+        if (!abortCtrl.signal.aborted) {
+          setDomainHealth(data);
+        }
+      })
+      .catch(() => {});
+
+    return () => abortCtrl.abort();
+  }, [deployment?.project_id, targetProjectId]);
+
+  // Terminal scroll tracking
+  const handleTerminalScroll = () => {
+    if (!terminalBodyRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = terminalBodyRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
+    if (!isAtBottom) {
+      isAutoScrollPausedRef.current = true;
+      if (autoScroll) setAutoScroll(false);
+    } else {
+      isAutoScrollPausedRef.current = false;
+      if (!autoScroll) setAutoScroll(true);
+    }
+  };
+
+  const handleToggleAutoScroll = () => {
+    const next = !autoScroll;
+    setAutoScroll(next);
+    isAutoScrollPausedRef.current = !next;
+    if (next && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
+  // Auto-scroll logs unless manually paused
+  useEffect(() => {
+    if (autoScroll && !isAutoScrollPausedRef.current && logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs, autoScroll]);
@@ -279,8 +391,9 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
             type="button"
             className="back-crumb-btn"
             onClick={() => navigate("/deployments")}
+            aria-label="Back to deployments list"
           >
-            <ArrowLeftIcon size={12} />
+            <ArrowLeftIcon size={12} aria-hidden="true" />
             <span>Deployments</span>
           </button>
           <span className="crumb-sep">/</span>
@@ -325,13 +438,12 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
       </div>
 
       {error && (
-        <div className="auth-message-block error" style={{ marginBottom: "1.5rem" }}>
-          <span>Failed to load deployment: {error}</span>
+        <div style={{ marginBottom: "1.5rem", display: "flex", alignItems: "center", gap: "1rem" }}>
+          <FormMessage message={`Failed to load deployment: ${error}`} type="error" style={{ flex: 1 }} />
           <button
             type="button"
             className="btn-secondary btn-sm"
             onClick={() => loadDeploymentData(false)}
-            style={{ marginLeft: "1rem" }}
           >
             Retry
           </button>
@@ -393,16 +505,18 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
                 type="button"
                 className="btn-secondary btn-sm"
                 onClick={handleCopyLogs}
+                aria-label="Copy deployment logs to clipboard"
               >
-                <CopyIcon size={12} />
+                <CopyIcon size={12} aria-hidden="true" />
                 <span>{copied ? "Copied!" : "Copy"}</span>
               </button>
               <button
                 type="button"
                 className="btn-secondary btn-sm"
                 onClick={handleDownloadLogs}
+                aria-label="Download deployment logs as text file"
               >
-                <DownloadIcon size={12} />
+                <DownloadIcon size={12} aria-hidden="true" />
                 <span>Download</span>
               </button>
             </div>
@@ -422,9 +536,9 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
                 type="button"
                 className="search-clear-btn"
                 onClick={() => setLogFilterQuery("")}
-                aria-label="Clear log filter"
+                aria-label="Clear log search filter"
               >
-                <CloseIcon size={10} />
+                <CloseIcon size={10} aria-hidden="true" />
               </button>
             )}
 
@@ -435,6 +549,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
                   type="button"
                   className={`logs-level-btn ${logLevelFilter === lvl ? "active" : ""}`}
                   onClick={() => setLogLevelFilter(lvl)}
+                  aria-label={`Filter by ${lvl} log level`}
                 >
                   {lvl}
                 </button>
@@ -444,25 +559,28 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
             <button
               type="button"
               className={`logs-level-btn ${autoScroll ? "active" : ""}`}
-              onClick={() => setAutoScroll(!autoScroll)}
+              onClick={handleToggleAutoScroll}
               title="Toggle auto-scroll to bottom"
+              aria-label="Toggle terminal auto-scroll"
               style={{ marginLeft: "6px" }}
             >
               Auto-scroll
             </button>
           </div>
 
-          <div className="logs-console-body">
+          <div
+            className="logs-console-body"
+            ref={terminalBodyRef}
+            onScroll={handleTerminalScroll}
+            role="log"
+            aria-live="polite"
+            aria-label="Build and deployment logs console"
+            style={{ position: "relative" }}
+          >
             {filteredLogs.length > 0 ? (
-              filteredLogs.map((log, index) => {
-                const level = (log.level || "INFO").toLowerCase();
-                return (
-                  <div key={log.id || index} className={`log-line-item log-${log.type || level}`}>
-                    <span className="log-time-cell">{log.time || "—"}</span>
-                    <span className="log-msg-cell">{log.text || log.message}</span>
-                  </div>
-                );
-              })
+              filteredLogs.map((log, index) => (
+                <LogLineItem key={log.id || index} log={log} />
+              ))
             ) : (
               <div className="log-line-item log-dim">
                 <span className="log-time-cell">—</span>
@@ -472,6 +590,22 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               </div>
             )}
             <div ref={logsEndRef} />
+            {!autoScroll && (
+              <button
+                type="button"
+                className="term-jump-bottom-btn"
+                onClick={() => {
+                  setAutoScroll(true);
+                  isAutoScrollPausedRef.current = false;
+                  if (logsEndRef.current) {
+                    logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+                  }
+                }}
+                aria-label="Jump to bottom of logs"
+              >
+                Jump to bottom ↓
+              </button>
+            )}
           </div>
         </section>
 
@@ -488,7 +622,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               <dd>
                 <span className="context-repo-tag">
                   <GitHubIcon size={13} className="inline-icon" />
-                  <code>{deployment?.repo || deployment?.repository_url || `github.com/acme/${projectName}`}</code>
+                  <code className="truncate-mono">{deployment?.repo || deployment?.repository_url || `github.com/acme/${projectName}`}</code>
                 </span>
               </dd>
             </div>
@@ -506,7 +640,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               <dd>
                 <span className="context-commit-tag">
                   <CommitIcon size={11} className="inline-icon" />
-                  <code>{commitSha}</code>
+                  <code className="truncate-mono">{commitSha}</code>
                 </span>
               </dd>
             </div>
@@ -529,10 +663,43 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
             </div>
             <div className="context-item">
               <dt>Ingress Domain</dt>
-              <dd style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                <a href={domainHref} target="_blank" rel="noreferrer" style={{ color: "var(--accent-emerald, #10b981)", textDecoration: "none", fontWeight: 500 }}>
-                  <code>{projectDomain}</code>
-                </a>
+              <dd style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <a href={domainHref} target="_blank" rel="noreferrer" style={{ color: "var(--accent-emerald, #10b981)", textDecoration: "none", fontWeight: 500 }}>
+                    <code>{projectDomain}</code>
+                  </a>
+                  {domainHealth?.probe?.healthy ? (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        fontSize: "0.7rem",
+                        color: "var(--accent-emerald, #10b981)",
+                        background: "rgba(16, 185, 129, 0.1)",
+                        border: "1px solid rgba(16, 185, 129, 0.25)",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                      }}
+                      title="Nginx Upstream Health Verified"
+                    >
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor" }} />
+                      <span>Live · {domainHealth.probe.latency_ms ? `${domainHealth.probe.latency_ms}ms` : "200 OK"}</span>
+                    </span>
+                  ) : resolvedRoute?.matched ? (
+                    <span
+                      style={{
+                        fontSize: "0.7rem",
+                        color: "var(--text-secondary)",
+                        background: "rgba(255, 255, 255, 0.05)",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                      }}
+                    >
+                      Upstream: {resolvedRoute.target_upstream}
+                    </span>
+                  ) : null}
+                </div>
                 {isLocalHost && (
                   <span style={{ fontSize: "0.75rem", color: "var(--text-tertiary)" }}>
                     Local: <a href={`http://${localDomain}`} target="_blank" rel="noreferrer" style={{ color: "var(--text-secondary)" }}>{localDomain}</a>
@@ -551,18 +718,19 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
 
             <div className="target-card-row">
               <span className="target-card-label">Container ID</span>
-              <span className="target-card-value" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <span className="target-card-value" style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
                 {containerId ? (
                   <>
-                    <code>{containerId.slice(0, 14)}</code>
+                    <code className="truncate-mono">{containerId.slice(0, 14)}</code>
                     <button
                       type="button"
                       className="commit-hash-pill"
-                      style={{ padding: "1px 5px", fontSize: "10px" }}
+                      style={{ padding: "1px 5px", fontSize: "10px", flexShrink: 0 }}
                       onClick={() => handleCopyContainerId(containerId)}
                       title="Copy container ID"
+                      aria-label={copiedContainerId ? "Copied container ID" : "Copy container ID"}
                     >
-                      <CopyIcon size={10} />
+                      <CopyIcon size={10} aria-hidden="true" />
                       <span>{copiedContainerId ? "Copied" : ""}</span>
                     </button>
                   </>

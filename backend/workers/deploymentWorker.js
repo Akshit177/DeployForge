@@ -475,6 +475,11 @@ async function pollOnce() {
 }
 
 async function startWorkerLoop() {
+  const executionEngine = (process.env.EXECUTION_ENGINE || "node").toLowerCase();
+  if (executionEngine === "cpp" || process.env.ENABLE_NODE_DEPLOYMENT_WORKER === "false") {
+    console.log(`[Worker] Node.js deployment worker standby (EXECUTION_ENGINE=${executionEngine})`);
+    return;
+  }
   await ensureConsumerGroup();
   isRunning = true;
   console.log(`[Worker] ${CONSUMER_NAME} listening on Redis Stream "${STREAM_NAME}"`);

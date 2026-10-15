@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
+import FormMessage from "../components/common/FormMessage.jsx";
 import { fetchProjects, deleteProject } from "../services/projectService.js";
 import { triggerDeployment } from "../services/deploymentService.js";
 import {
@@ -69,15 +70,26 @@ export default function ProjectsPage({ navigate }) {
   const [redeployingId, setRedeployingId] = useState(null);
   const [redeployNotice, setRedeployNotice] = useState(null);
 
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+
+  // Debounced search filtering
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 200);
+    return () => clearTimeout(handler);
+  }, [query]);
+
   const pollTimerRef = useRef(null);
 
-  const loadProjects = async (isBackground = false) => {
+  const loadProjects = async (isBackground = false, signal) => {
     try {
       if (!isBackground) setLoading(true);
       setError(null);
-      const data = await fetchProjects();
+      const data = await fetchProjects({ signal });
       setProjects(data);
     } catch (err) {
+      if (err.name === "AbortError") return;
       console.warn("Could not load backend projects:", err.message);
       if (!isBackground) setError(err.message);
     } finally {
@@ -86,8 +98,10 @@ export default function ProjectsPage({ navigate }) {
   };
 
   useEffect(() => {
-    loadProjects();
+    const controller = new AbortController();
+    loadProjects(false, controller.signal);
     return () => {
+      controller.abort();
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
   }, []);
@@ -189,11 +203,13 @@ export default function ProjectsPage({ navigate }) {
       const pRuntime = p.runtime || "";
       const pStatus = (p.state || p.status || "Queued").toLowerCase();
 
+      const q = debouncedQuery.toLowerCase();
       const matchesSearch =
-        pName.toLowerCase().includes(query.toLowerCase()) ||
-        pRepo.toLowerCase().includes(query.toLowerCase()) ||
-        pCommit.toLowerCase().includes(query.toLowerCase()) ||
-        pRuntime.toLowerCase().includes(query.toLowerCase());
+        !q ||
+        pName.toLowerCase().includes(q) ||
+        pRepo.toLowerCase().includes(q) ||
+        pCommit.toLowerCase().includes(q) ||
+        pRuntime.toLowerCase().includes(q);
 
       if (!matchesSearch) return false;
       if (activeFilter === "All") return true;
@@ -203,7 +219,7 @@ export default function ProjectsPage({ navigate }) {
       if (activeFilter === "Queued") return pStatus === "queued" || pStatus === "initiated";
       return true;
     });
-  }, [projects, query, activeFilter]);
+  }, [projects, debouncedQuery, activeFilter]);
 
   const handleCopyCommit = (e, commit) => {
     e.stopPropagation();
@@ -317,9 +333,9 @@ export default function ProjectsPage({ navigate }) {
               type="button"
               className="search-clear-btn"
               onClick={() => setQuery("")}
-              aria-label="Clear search"
+              aria-label="Clear project search query"
             >
-              <CloseIcon size={12} />
+              <CloseIcon size={12} aria-hidden="true" />
             </button>
           )}
         </div>
@@ -327,13 +343,12 @@ export default function ProjectsPage({ navigate }) {
 
       {/* Error notification banner if any */}
       {error && (
-        <div className="auth-message-block error" style={{ marginBottom: "1.5rem" }}>
-          <span>Failed to sync with backend: {error}</span>
+        <div style={{ marginBottom: "1.5rem", display: "flex", alignItems: "center", gap: "1rem" }}>
+          <FormMessage message={`Failed to sync with backend: ${error}`} type="error" style={{ flex: 1 }} />
           <button
             type="button"
             className="btn-secondary btn-sm"
             onClick={() => loadProjects(false)}
-            style={{ marginLeft: "1rem" }}
           >
             Retry
           </button>
@@ -343,13 +358,17 @@ export default function ProjectsPage({ navigate }) {
       {/* Project Directory Grid */}
       <div className="figma-projects-grid">
         {loading ? (
-          <div className="figma-empty-state">
-            <div className="empty-glyph-box">
-              <SpinnerIcon size={24} className="spin" />
+          [1, 2, 3].map((idx) => (
+            <div key={`skeleton-${idx}`} className="figma-project-card skeleton-card" aria-hidden="true" style={{ opacity: 0.6 }}>
+              <div className="card-top-row">
+                <div style={{ height: "20px", width: "120px", background: "rgba(255, 255, 255, 0.08)", borderRadius: "4px" }} />
+                <div style={{ height: "18px", width: "70px", background: "rgba(255, 255, 255, 0.08)", borderRadius: "9999px" }} />
+              </div>
+              <div style={{ height: "14px", width: "80%", background: "rgba(255, 255, 255, 0.05)", borderRadius: "4px", margin: "14px 0" }} />
+              <div style={{ height: "14px", width: "50%", background: "rgba(255, 255, 255, 0.05)", borderRadius: "4px", marginBottom: "16px" }} />
+              <div style={{ height: "12px", width: "100%", background: "rgba(255, 255, 255, 0.03)", borderRadius: "4px", marginTop: "auto" }} />
             </div>
-            <h3>Loading workspace projects...</h3>
-            <p>Fetching project repositories and deployment states.</p>
-          </div>
+          ))
         ) : visibleProjects.length > 0 ? (
           visibleProjects.map((p) => {
             const state = p.state || p.status || "Queued";
@@ -411,7 +430,7 @@ export default function ProjectsPage({ navigate }) {
 
                 <div className="card-repo-row">
                   <GitHubIcon size={13} className="repo-octo-icon" />
-                  <span className="card-repo-mono">{p.repo || p.repository_url}</span>
+                  <span className="card-repo-mono truncate-mono">{p.repo || p.repository_url}</span>
                 </div>
 
                 <div className="card-commit-tag">
@@ -420,19 +439,21 @@ export default function ProjectsPage({ navigate }) {
                     <span>{p.branch || "main"}</span>
                   </span>
                   <span className="dot-sep">·</span>
-                  <span
+                  <button
+                    type="button"
                     className="commit-hash-pill"
                     onClick={(e) => handleCopyCommit(e, p.commit || p.latest_commit)}
                     title="Click to copy commit SHA"
+                    aria-label={copiedCommit === (p.commit || p.latest_commit) ? "Copied commit SHA" : `Copy commit SHA ${(p.commit || p.latest_commit || "HEAD").slice(0, 7)}`}
                   >
-                    <CommitIcon size={11} className="commit-icon-svg" />
-                    <code>{(p.commit || p.latest_commit || "HEAD").slice(0, 7)}</code>
+                    <CommitIcon size={11} className="commit-icon-svg" aria-hidden="true" />
+                    <code className="truncate-mono">{(p.commit || p.latest_commit || "HEAD").slice(0, 7)}</code>
                     {copiedCommit === (p.commit || p.latest_commit) ? (
                       <span className="copied-tag">Copied</span>
                     ) : (
-                      <CopyIcon size={10} className="copy-icon-hover" />
+                      <CopyIcon size={10} className="copy-icon-hover" aria-hidden="true" />
                     )}
-                  </span>
+                  </button>
                 </div>
 
                 {/* Stage Progress Bar for active or failed deployments */}
@@ -462,8 +483,9 @@ export default function ProjectsPage({ navigate }) {
                     rel="noreferrer"
                     onClick={(e) => e.stopPropagation()}
                     title="Open live production domain in new tab"
+                    aria-label={`Open ${rawDomain} in new tab`}
                   >
-                    <span>{rawDomain}</span>
+                    <span className="truncate-mono">{rawDomain}</span>
                     <ExternalLinkIcon size={12} className="ext-arrow-svg" />
                   </a>
                 </div>

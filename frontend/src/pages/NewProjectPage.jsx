@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { createProject } from "../services/projectService.js";
+import TextInput from "../components/common/TextInput.jsx";
+import FormMessage from "../components/common/FormMessage.jsx";
 import {
   GitHubIcon,
   GitBranchIcon,
@@ -17,26 +19,32 @@ import {
   NginxIcon,
 } from "../components/common/TechIcons.jsx";
 
+const POSIX_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 function parseEnvString(rawText) {
-  const lines = rawText.split("\n");
+  const lines = rawText.split(/\r?\n/);
   const parsed = [];
+  const seenKeys = new Set();
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eqIdx = trimmed.indexOf("=");
     if (eqIdx <= 0) continue;
-    const key = trimmed.slice(0, eqIdx).trim().toUpperCase();
+    const key = trimmed.slice(0, eqIdx).trim();
+    if (!POSIX_ENV_KEY_REGEX.test(key)) continue;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+
     let val = trimmed.slice(eqIdx + 1).trim();
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
-    const isSecret = /SECRET|KEY|PASSWORD|PASS|TOKEN|CREDENTIAL|PRIVATE/i.test(key);
     parsed.push({
       id: `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       key,
       value: val,
-      isSecret,
-      show: !isSecret,
+      isSecret: true,
+      show: false,
     });
   }
   return parsed;
@@ -123,7 +131,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
   // Env vars state
   const [envMode, setEnvMode] = useState("form"); // "form" | "bulk"
   const [envVars, setEnvVars] = useState([
-    { id: "1", key: "NODE_ENV", value: "production", isSecret: false, show: true },
+    { id: "1", key: "NODE_ENV", value: "production", isSecret: true, show: false },
     { id: "2", key: "DATABASE_URL", value: "postgres://user:secret@db.deployforge.internal:5432/app", isSecret: true, show: false },
   ]);
   const [bulkEnvText, setBulkEnvText] = useState(
@@ -131,19 +139,58 @@ export default function NewProjectPage({ navigate, searchParams }) {
   );
   const [newKey, setNewKey] = useState("");
   const [newVal, setNewVal] = useState("");
+  const [showNewVal, setShowNewVal] = useState(false);
+  const [envKeyError, setEnvKeyError] = useState("");
+
+  const handleKeyPaste = (e) => {
+    const text = e.clipboardData?.getData("text");
+    if (text && (text.includes("\n") || text.includes("="))) {
+      e.preventDefault();
+      const parsed = parseEnvString(text);
+      if (parsed.length > 0) {
+        if (parsed.length === 1 && !text.includes("\n")) {
+          setNewKey(parsed[0].key);
+          setNewVal(parsed[0].value);
+          setEnvKeyError("");
+          return;
+        }
+
+        const existingKeys = new Set(envVars.map((v) => v.key));
+        const newItems = parsed.filter((p) => !existingKeys.has(p.key));
+        const updated = [...envVars, ...newItems];
+        setEnvVars(updated);
+        setBulkEnvText(serializeEnvVars(updated));
+        setNewKey("");
+        setNewVal("");
+        setEnvKeyError("");
+      }
+    }
+  };
 
   const handleAddEnv = (e) => {
-    e.preventDefault();
-    if (!newKey.trim()) return;
-    const isSecret = /SECRET|KEY|PASSWORD|PASS|TOKEN|CREDENTIAL|PRIVATE/i.test(newKey.trim());
+    if (e) e.preventDefault();
+    setEnvKeyError("");
+    const cleanKey = newKey.trim();
+    if (!cleanKey) return;
+
+    if (!POSIX_ENV_KEY_REGEX.test(cleanKey)) {
+      setEnvKeyError("Key must follow POSIX format (letters, digits, underscores, starting with letter or underscore).");
+      return;
+    }
+
+    if (envVars.some((v) => v.key === cleanKey)) {
+      setEnvKeyError(`Variable "${cleanKey}" already exists.`);
+      return;
+    }
+
     const updated = [
       ...envVars,
       {
         id: Date.now().toString(),
-        key: newKey.trim().toUpperCase(),
+        key: cleanKey,
         value: newVal.trim(),
-        isSecret,
-        show: !isSecret,
+        isSecret: true,
+        show: false,
       },
     ];
     setEnvVars(updated);
@@ -309,90 +356,60 @@ export default function NewProjectPage({ navigate, searchParams }) {
           </div>
 
           {errorMessage && (
-            <div className="auth-message-block error" style={{ margin: "1rem 0" }}>
-              <span>{errorMessage}</span>
-            </div>
+            <FormMessage
+              message={errorMessage}
+              type="error"
+              style={{ margin: "1rem 0" }}
+            />
           )}
 
           <form onSubmit={handleDeploy} className="setup-main-form">
             {/* Repo Field */}
-            <div className="form-field-block">
-              <label htmlFor="repo-url">GitHub repository URL</label>
-              <div className="input-with-icon">
-                <GitHubIcon size={16} className="field-icon-svg" />
-                <input
-                  id="repo-url"
-                  required
-                  type="text"
-                  value={repoUrl}
-                  onChange={(e) => handleRepoUrlChange(e.target.value)}
-                  onBlur={handleRepoUrlBlur}
-                  placeholder="https://github.com/organization/repository"
-                  style={repoUrlError ? { borderColor: "#ef4444" } : {}}
-                />
-              </div>
-              {repoUrlError ? (
-                <span className="field-error-text">
-                  <CloseIcon size={11} />
-                  <span>{repoUrlError}</span>
-                </span>
-              ) : (
-                <span className="field-hint">Public repository. Cloned securely into isolated deployment workspace.</span>
-              )}
-            </div>
+            <TextInput
+              id="repo-url"
+              label="GitHub repository URL"
+              required
+              monospace
+              prefixIcon={GitHubIcon}
+              value={repoUrl}
+              onChange={(e) => handleRepoUrlChange(e.target.value)}
+              onBlur={handleRepoUrlBlur}
+              placeholder="https://github.com/organization/repository"
+              error={repoUrlError}
+              helperText="Public repository. Cloned securely into isolated deployment workspace."
+              className="form-field-block"
+            />
 
             {/* Two-Column: Project Name & Branch */}
             <div className="form-two-col">
-              <div className="form-field-block">
-                <label htmlFor="project-name">Project name</label>
-                <input
-                  id="project-name"
-                  required
-                  value={projectName}
-                  onChange={(e) => handleProjectNameChange(e.target.value)}
-                  placeholder="my-app"
-                  style={nameError ? { borderColor: "#ef4444" } : {}}
-                />
-                {nameError && (
-                  <span className="field-error-text">
-                    <CloseIcon size={11} />
-                    <span>{nameError}</span>
-                  </span>
-                )}
-              </div>
+              <TextInput
+                id="project-name"
+                label="Project name"
+                required
+                value={projectName}
+                onChange={(e) => handleProjectNameChange(e.target.value)}
+                placeholder="my-app"
+                error={nameError}
+                className="form-field-block"
+              />
 
-              <div className="form-field-block">
-                <label htmlFor="branch">Production branch</label>
-                <div className="input-with-icon">
-                  <GitBranchIcon size={13} className="field-icon-svg" />
-                  <input
-                    id="branch"
-                    required
-                    value={branch}
-                    onChange={(e) => setBranch(e.target.value)}
-                    placeholder="main"
-                  />
-                </div>
-              </div>
+              <TextInput
+                id="branch"
+                label="Production branch"
+                required
+                prefixIcon={GitBranchIcon}
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                placeholder="main"
+                className="form-field-block"
+              />
             </div>
 
             {/* Build Engine: Strict Dockerfile */}
             <div className="form-field-block">
               <label>Build Engine & Runtime</label>
-              <div
-                className="runtime-docker-badge-card"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "0.875rem 1rem",
-                  borderRadius: "8px",
-                  border: "1px solid #27272a",
-                  background: "#09090b",
-                  gap: "1rem",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+              <div className="runtime-docker-badge-card">
+                <div className="runtime-info-left">
                   <div
                     style={{
                       width: "36px",
@@ -408,12 +425,12 @@ export default function NewProjectPage({ navigate, searchParams }) {
                   >
                     <DockerIcon size={20} className="text-green" />
                   </div>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="runtime-title-row">
                       <strong style={{ fontSize: "0.875rem", color: "#f4f4f5" }}>Root Dockerfile Engine</strong>
                       <span className="starter-badge ready" style={{ fontSize: "0.65rem" }}>Strict Dockerfile</span>
                     </div>
-                    <small style={{ fontSize: "0.75rem", color: "#71717a", display: "block", marginTop: "2px" }}>
+                    <small className="runtime-text-desc">
                       DeployForge strictly builds using the repository&apos;s root <code>Dockerfile</code>. Any framework or language is packaged into an isolated OCI container.
                     </small>
                   </div>
@@ -423,29 +440,23 @@ export default function NewProjectPage({ navigate, searchParams }) {
             </div>
 
             {/* Container Port */}
-            <div className="form-field-block">
-              <label htmlFor="port">Internal Container Port</label>
-              <input
-                id="port"
-                required
-                type="number"
-                value={port}
-                onChange={(e) => {
-                  setPort(e.target.value);
-                  if (portError) setPortError("");
-                }}
-                placeholder="3000"
-                style={{ width: "160px", ...(portError ? { borderColor: "#ef4444" } : {}) }}
-              />
-              {portError ? (
-                <span className="field-error-text">
-                  <CloseIcon size={11} />
-                  <span>{portError}</span>
-                </span>
-              ) : (
-                <span className="field-hint">The port your application server listens on inside the Docker container.</span>
-              )}
-            </div>
+            <TextInput
+              id="port"
+              label="Internal Container Port"
+              required
+              type="number"
+              monospace
+              value={port}
+              onChange={(e) => {
+                setPort(e.target.value);
+                if (portError) setPortError("");
+              }}
+              placeholder="3000"
+              error={portError}
+              helperText="The port your application server listens on inside the Docker container."
+              style={{ maxWidth: "240px" }}
+              className="form-field-block"
+            />
 
             {/* Environment Variables Editor: Form vs Bulk */}
             <div className="form-field-block">
@@ -481,17 +492,15 @@ export default function NewProjectPage({ navigate, searchParams }) {
                           <code className="env-key-cell">{item.key}</code>
                           <span className="env-equal-sign">=</span>
                           <div className="env-val-cell">
-                            <span>{item.isSecret && !item.show ? "••••••••••••••••" : item.value}</span>
-                            {item.isSecret && (
-                              <button
-                                type="button"
-                                className="env-mask-btn"
-                                onClick={() => handleToggleSecret(item.id)}
-                                aria-label={item.show ? "Hide value" : "Reveal value"}
-                              >
-                                {item.show ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
-                              </button>
-                            )}
+                            <span>{!item.show ? "••••••••••••••••" : item.value}</span>
+                            <button
+                              type="button"
+                              className="env-mask-btn"
+                              onClick={() => handleToggleSecret(item.id)}
+                              aria-label={item.show ? `Hide value for variable ${item.key}` : `Reveal value for variable ${item.key}`}
+                            >
+                              {item.show ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
+                            </button>
                           </div>
                           <button
                             type="button"
@@ -506,19 +515,50 @@ export default function NewProjectPage({ navigate, searchParams }) {
                     </div>
                   )}
 
+                  {envKeyError && (
+                    <div style={{ color: "#ef4444", fontSize: "11px", marginBottom: "6px" }}>
+                      {envKeyError}
+                    </div>
+                  )}
+
                   <div className="env-add-inline">
                     <input
                       value={newKey}
-                      onChange={(e) => setNewKey(e.target.value)}
+                      onChange={(e) => {
+                        setNewKey(e.target.value);
+                        if (envKeyError) setEnvKeyError("");
+                      }}
+                      onPaste={handleKeyPaste}
                       placeholder="KEY (e.g. API_KEY)"
                       className="env-inline-input key"
+                      style={envKeyError ? { borderColor: "#ef4444" } : {}}
                     />
-                    <input
-                      value={newVal}
-                      onChange={(e) => setNewVal(e.target.value)}
-                      placeholder="VALUE"
-                      className="env-inline-input val"
-                    />
+                    <div style={{ position: "relative", flex: 1, minWidth: "120px", display: "flex", alignItems: "center" }}>
+                      <input
+                        type={showNewVal ? "text" : "password"}
+                        value={newVal}
+                        onChange={(e) => setNewVal(e.target.value)}
+                        placeholder="VALUE"
+                        className="env-inline-input val"
+                        style={{ width: "100%", paddingRight: "30px" }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowNewVal(!showNewVal)}
+                        style={{
+                          position: "absolute",
+                          right: "8px",
+                          background: "none",
+                          border: "none",
+                          color: "var(--text-tertiary)",
+                          cursor: "pointer",
+                          padding: "2px",
+                        }}
+                        aria-label={showNewVal ? "Hide new variable value" : "Reveal new variable value"}
+                      >
+                        {showNewVal ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
+                      </button>
+                    </div>
                     <button
                       type="button"
                       className="btn-secondary btn-sm"
@@ -562,7 +602,7 @@ export default function NewProjectPage({ navigate, searchParams }) {
 
             {/* Live Domain Preview Box */}
             <div className="domain-preview-box" style={{ marginTop: "1.25rem", padding: "1rem", borderRadius: "var(--radius-md)", background: "rgba(255, 255, 255, 0.02)", border: "1px solid var(--border-subtle)" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+              <div className="domain-preview-header" style={{ marginBottom: "0.5rem" }}>
                 <span className="preview-label" style={{ fontWeight: 600, color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
                   Public Ingress Route:
                 </span>
@@ -572,10 +612,10 @@ export default function NewProjectPage({ navigate, searchParams }) {
               </div>
 
               {/* Primary Vanity Domain */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", background: "rgba(0, 0, 0, 0.35)", padding: "8px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", marginBottom: "6px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+              <div className="domain-preview-route-row primary" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", background: "rgba(0, 0, 0, 0.35)", padding: "8px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", marginBottom: "6px", minWidth: 0, width: "100%", boxSizing: "border-box" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden", minWidth: 0, flex: 1 }}>
                   <span className="status-indicator status-dot green-pulse" style={{ width: "6px", height: "6px", flexShrink: 0 }} />
-                  <strong className="preview-url" style={{ color: "var(--accent-emerald, #10b981)", fontFamily: "var(--font-mono)", fontSize: "0.8125rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <strong className="preview-url" style={{ color: "var(--accent-emerald, #10b981)", fontFamily: "var(--font-mono)", fontSize: "0.8125rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>
                     {publicUrl}
                   </strong>
                 </div>
@@ -584,29 +624,31 @@ export default function NewProjectPage({ navigate, searchParams }) {
                   className="commit-hash-pill"
                   onClick={() => handleCopyUrl(publicUrl, "prod")}
                   title="Copy public URL"
+                  aria-label={copiedUrl === "prod" ? "Copied public URL" : "Copy public URL"}
                   style={{ flexShrink: 0 }}
                 >
-                  <CopyIcon size={11} />
+                  <CopyIcon size={11} aria-hidden="true" />
                   <span>{copiedUrl === "prod" ? "Copied" : "Copy"}</span>
                 </button>
               </div>
 
               {/* Local Development Host Route */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", background: "rgba(255, 255, 255, 0.015)", padding: "6px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.75rem", color: "var(--text-secondary)", overflow: "hidden" }}>
+              <div className="domain-preview-route-row local" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", background: "rgba(255, 255, 255, 0.015)", padding: "6px 12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", minWidth: 0, width: "100%", boxSizing: "border-box" }}>
+                <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "6px", fontSize: "0.75rem", color: "var(--text-secondary)", minWidth: 0, flex: 1, overflow: "hidden" }}>
                   <span style={{ color: "var(--text-tertiary)", flexShrink: 0 }}>Local:</span>
-                  <code style={{ color: "var(--text-primary)", fontSize: "0.75rem" }}>{localUrl}</code>
+                  <code style={{ color: "var(--text-primary)", fontSize: "0.75rem", wordBreak: "break-all" }}>{localUrl}</code>
                   <span style={{ color: "var(--text-tertiary)" }}>·</span>
-                  <code style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{nipIoUrl}</code>
+                  <code style={{ color: "var(--text-secondary)", fontSize: "0.7rem", wordBreak: "break-all" }}>{nipIoUrl}</code>
                 </div>
                 <button
                   type="button"
                   className="commit-hash-pill"
                   onClick={() => handleCopyUrl(localUrl, "local")}
                   title="Copy local ingress URL"
+                  aria-label={copiedUrl === "local" ? "Copied local ingress URL" : "Copy local ingress URL"}
                   style={{ flexShrink: 0 }}
                 >
-                  <CopyIcon size={10} />
+                  <CopyIcon size={10} aria-hidden="true" />
                   <span>{copiedUrl === "local" ? "Copied" : "Copy"}</span>
                 </button>
               </div>
@@ -691,8 +733,8 @@ export default function NewProjectPage({ navigate, searchParams }) {
 
           {/* Infrastructure Topology Card */}
           <div className="deployment-target-card">
-            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
-              <ContainerIcon size={14} className="text-green" />
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px", flexWrap: "wrap", minWidth: 0 }}>
+              <ContainerIcon size={14} className="text-green" style={{ flexShrink: 0 }} />
               <strong style={{ fontSize: "12px", color: "#ffffff" }}>Target Infrastructure Specs</strong>
             </div>
             <div className="target-card-row">

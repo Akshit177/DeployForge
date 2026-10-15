@@ -8,6 +8,8 @@ const router = express.Router();
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_RUNTIMES = ["node", "python", "go", "docker", "static"];
+const GIT_REPO_REGEX = /^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?$/i;
+const BRANCH_REGEX = /^[A-Za-z0-9._/-]{1,100}$/;
 
 function sanitizeProjectName(rawName) {
   if (typeof rawName !== "string") return "";
@@ -23,7 +25,11 @@ function normalizeRepoUrl(rawUrl) {
   let url = rawUrl.trim();
   if (url.startsWith("git@github.com:")) {
     url = url.replace("git@github.com:", "https://github.com/");
-  } else if (!/^https?:\/\//i.test(url) && (url.startsWith("github.com") || url.startsWith("gitlab.com"))) {
+  } else if (url.startsWith("git@gitlab.com:")) {
+    url = url.replace("git@gitlab.com:", "https://gitlab.com/");
+  } else if (url.startsWith("git@bitbucket.org:")) {
+    url = url.replace("git@bitbucket.org:", "https://bitbucket.org/");
+  } else if (!/^https?:\/\//i.test(url) && (url.startsWith("github.com") || url.startsWith("gitlab.com") || url.startsWith("bitbucket.org"))) {
     url = `https://${url}`;
   }
   return url;
@@ -115,15 +121,30 @@ router.post("/", async (req, res) => {
     });
   }
 
-  if (!normalizedRepo || !/^https?:\/\/.+/i.test(normalizedRepo)) {
+  if (!normalizedRepo || !GIT_REPO_REGEX.test(normalizedRepo)) {
     return res.status(400).json({
-      message: "Please provide a valid repository URL (e.g., https://github.com/organization/repository).",
+      message: "Please provide a valid HTTPS repository URL from GitHub, GitLab, or Bitbucket (e.g., https://github.com/organization/repository).",
+    });
+  }
+
+  const trimmedBranch = String(branch || "main").trim();
+  if (!BRANCH_REGEX.test(trimmedBranch) || trimmedBranch.startsWith("-")) {
+    return res.status(400).json({
+      message: "Invalid branch name. Must be 1-100 characters and cannot start with a hyphen.",
     });
   }
 
   const selectedRuntime = ALLOWED_RUNTIMES.includes(runtime) ? runtime : "docker";
-  const parsedPort = Number.parseInt(port, 10);
-  const internalPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 3000;
+  let internalPort = 3000;
+  if (port !== undefined && port !== null && port !== "") {
+    const parsedPort = Number(port);
+    if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+      return res.status(400).json({
+        message: "Internal container port must be an integer between 1024 and 65535.",
+      });
+    }
+    internalPort = parsedPort;
+  }
   const isAutoDeploy = autoDeploy !== undefined ? Boolean(autoDeploy) : Boolean(auto_deploy);
   const varsToSave = Array.isArray(envVars) ? envVars : Array.isArray(env_vars) ? env_vars : [];
   const domain = `${projectSlug}.deployforge.app`;
@@ -154,7 +175,7 @@ router.post("/", async (req, res) => {
         req.user.id,
         projectSlug,
         normalizedRepo,
-        String(branch).trim() || "main",
+        trimmedBranch,
         selectedRuntime,
         internalPort,
         isAutoDeploy,
@@ -308,9 +329,28 @@ router.patch("/:id", async (req, res) => {
       }
     }
 
-    const newBranch = branch !== undefined ? String(branch).trim() || current.branch : current.branch;
+    let newBranch = current.branch;
+    if (branch !== undefined) {
+      const trimmedBranch = String(branch).trim();
+      if (!BRANCH_REGEX.test(trimmedBranch) || trimmedBranch.startsWith("-")) {
+        return res.status(400).json({
+          message: "Invalid branch name. Must be 1-100 characters and cannot start with a hyphen.",
+        });
+      }
+      newBranch = trimmedBranch;
+    }
+
     const newRuntime = runtime !== undefined && ALLOWED_RUNTIMES.includes(runtime) ? runtime : current.runtime;
-    const newPort = port !== undefined && Number.isInteger(Number(port)) ? Number(port) : current.port;
+    let newPort = current.port;
+    if (port !== undefined) {
+      const parsedPort = Number(port);
+      if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+        return res.status(400).json({
+          message: "Internal container port must be an integer between 1024 and 65535.",
+        });
+      }
+      newPort = parsedPort;
+    }
     const newAutoDeploy =
       autoDeploy !== undefined
         ? Boolean(autoDeploy)

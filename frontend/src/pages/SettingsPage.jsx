@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
-import { fetchProjects } from "../services/projectService.js";
+import TextInput from "../components/common/TextInput.jsx";
+import FormMessage from "../components/common/FormMessage.jsx";
+import { fetchProjects, deleteProject } from "../services/projectService.js";
 import { fetchEnvVars, saveEnvVars, deleteEnvVar } from "../services/envService.js";
 import {
   fetchSettings,
@@ -11,6 +13,9 @@ import {
   deleteDomain as apiDeleteDomain,
   validateGitHubProfile,
   verifyGitHubProfileExists,
+  getRoutes,
+  verifyDomainHealth,
+  resolveRoute,
 } from "../services/settingsService.js";
 import {
   GitHubIcon,
@@ -39,13 +44,14 @@ function timeAgo(dateString) {
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_\-\s]{2,50}$/;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ENV_KEY_REGEX = /^[A-Z_][A-Z0-9_]*$/;
+const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DOMAIN_REGEX = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/;
 
 function parseEnvString(rawText) {
-  const lines = rawText.split("\n");
+  const lines = rawText.split(/\r?\n/);
   const parsed = [];
   const errors = [];
+  const seenKeys = new Set();
 
   lines.forEach((line, index) => {
     const trimmed = line.trim();
@@ -55,11 +61,16 @@ function parseEnvString(rawText) {
       errors.push(`Line ${index + 1}: Missing "=" separator between key and value.`);
       return;
     }
-    const key = trimmed.slice(0, eqIdx).trim().toUpperCase();
+    const key = trimmed.slice(0, eqIdx).trim();
     if (!ENV_KEY_REGEX.test(key)) {
-      errors.push(`Line ${index + 1}: Invalid variable key "${key}". Must contain only uppercase letters, numbers, and underscores.`);
+      errors.push(`Line ${index + 1}: Invalid variable key "${key}". Must follow POSIX standard (letters, digits, underscores, cannot start with a digit).`);
       return;
     }
+    if (seenKeys.has(key)) {
+      errors.push(`Line ${index + 1}: Duplicate environment key "${key}" detected in input.`);
+      return;
+    }
+    seenKeys.add(key);
     let val = trimmed.slice(eqIdx + 1).trim();
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
@@ -80,7 +91,7 @@ function parseEnvString(rawText) {
   return { parsed, errors };
 }
 
-export default function SettingsPage() {
+export default function SettingsPage({ navigate, searchParams }) {
   // Personal Profile
   const [displayName, setDisplayName] = useState("Developer");
   const [email, setEmail] = useState("developer@deployforge.dev");
@@ -121,13 +132,23 @@ export default function SettingsPage() {
   const [newVarVal, setNewVarVal] = useState("");
   const [varKeyError, setVarKeyError] = useState("");
   const [isNewSecret, setIsNewSecret] = useState(true);
+  const [showNewVarVal, setShowNewVarVal] = useState(false);
   const [revealedIds, setRevealedIds] = useState(new Set());
   const [unmaskedValues, setUnmaskedValues] = useState({});
 
-  // Domains
+  // Project Deletion
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState("");
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  // Domains & Routing
   const [domains, setDomains] = useState([
     { domain: "web-app.deployforge.app", status: "Active", isDefault: true },
   ]);
+  const [activeRoutes, setActiveRoutes] = useState([]);
+  const [domainHealth, setDomainHealth] = useState({});
+  const [probingDomain, setProbingDomain] = useState(null);
   const [newDomain, setNewDomain] = useState("");
   const [isAddingDomain, setIsAddingDomain] = useState(false);
   const [showDnsGuide, setShowDnsGuide] = useState(true);
@@ -162,11 +183,64 @@ export default function SettingsPage() {
       .then((data) => {
         setProjects(data);
         if (data.length > 0) {
-          setSelectedProjectId(data[0].id);
+          const targetParamId = searchParams?.get("project_id") || searchParams?.get("projectId");
+          const found = data.find((p) => p.id === targetParamId);
+          setSelectedProjectId(found ? found.id : data[0].id);
         }
       })
       .catch((err) => console.warn("Failed to load projects:", err));
+
+    loadRoutes();
   }, []);
+
+  const loadRoutes = () => {
+    getRoutes()
+      .then((data) => {
+        if (data && Array.isArray(data.routes)) {
+          setActiveRoutes(data.routes);
+        }
+      })
+      .catch((err) => console.warn("Could not fetch routing table:", err));
+  };
+
+  const handleProbeDomain = async (domain, projectId) => {
+    setProbingDomain(domain);
+    try {
+      const targetProjId = projectId || selectedProjectId;
+      if (targetProjId) {
+        const health = await verifyDomainHealth(targetProjId);
+        setDomainHealth((prev) => ({
+          ...prev,
+          [domain]: {
+            healthy: health.probe ? health.probe.healthy : true,
+            latency_ms: health.probe ? health.probe.latency_ms : (health.response_time_ms || 2),
+            status: "Healthy",
+          },
+        }));
+      } else {
+        const resolved = await resolveRoute(domain);
+        setDomainHealth((prev) => ({
+          ...prev,
+          [domain]: {
+            healthy: resolved.matched,
+            status: resolved.matched ? "Routed" : "Unrouted",
+            upstream: resolved.target_upstream,
+          },
+        }));
+      }
+    } catch (err) {
+      setDomainHealth((prev) => ({
+        ...prev,
+        [domain]: {
+          healthy: false,
+          status: "Unreachable",
+          error: err.message,
+        },
+      }));
+    } finally {
+      setProbingDomain(null);
+    }
+  };
 
   // 2. Load environment variables when project changes
   useEffect(() => {
@@ -426,6 +500,46 @@ export default function SettingsPage() {
     }
   };
 
+  const handleKeyPaste = (e) => {
+    const text = e.clipboardData?.getData("text");
+    if (text && (text.includes("\n") || text.includes("="))) {
+      e.preventDefault();
+      const { parsed, errors } = parseEnvString(text);
+      if (errors.length > 0) {
+        setVarKeyError(errors[0]);
+        return;
+      }
+      if (parsed.length > 0) {
+        if (parsed.length === 1 && !text.includes("\n")) {
+          setNewVarKey(parsed[0].key);
+          setNewVarVal(parsed[0].value);
+          setIsNewSecret(parsed[0].isSecret);
+          setVarKeyError("");
+          return;
+        }
+
+        const parsedKeys = new Set(parsed.map((p) => p.key));
+        const merged = [
+          ...envVars.filter((v) => !parsedKeys.has(v.key)),
+          ...parsed,
+        ];
+        if (selectedProjectId) {
+          saveEnvVars(selectedProjectId, merged)
+            .then((saved) => {
+              setEnvVars(saved);
+              setIsAddingVar(false);
+              setNewVarKey("");
+              setNewVarVal("");
+              setVarKeyError("");
+            })
+            .catch((err) => {
+              setVarKeyError(err.message || "Failed to save parsed variables.");
+            });
+        }
+      }
+    }
+  };
+
   // Add Variable with Constraints
   const handleAddVariable = async (e) => {
     e.preventDefault();
@@ -436,9 +550,9 @@ export default function SettingsPage() {
       return;
     }
 
-    const cleanKey = newVarKey.trim().toUpperCase();
+    const cleanKey = newVarKey.trim();
     if (!ENV_KEY_REGEX.test(cleanKey)) {
-      setVarKeyError("Key must start with a letter/underscore and contain only uppercase letters, numbers, and underscores (e.g., API_KEY).");
+      setVarKeyError("Key must follow POSIX variable name format (letters, digits, underscores, starting with letter or underscore).");
       return;
     }
 
@@ -593,6 +707,32 @@ export default function SettingsPage() {
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
 
+  const handleDeleteProject = async (e) => {
+    if (e) e.preventDefault();
+    if (!activeProject) return;
+    if (deleteConfirmationText.trim() !== activeProject.name) {
+      setDeleteError(`Please type "${activeProject.name}" exactly to confirm.`);
+      return;
+    }
+    setIsDeletingProject(true);
+    setDeleteError("");
+    try {
+      await deleteProject(activeProject.id);
+      const remaining = projects.filter((p) => p.id !== activeProject.id);
+      setProjects(remaining);
+      setSelectedProjectId(remaining.length > 0 ? remaining[0].id : "");
+      setShowDeleteModal(false);
+      setDeleteConfirmationText("");
+      if (remaining.length === 0 && navigate) {
+        navigate("/projects");
+      }
+    } catch (err) {
+      setDeleteError(err.message || "Failed to delete project.");
+    } finally {
+      setIsDeletingProject(false);
+    }
+  };
+
   return (
     <div className="settings-page reveal">
       {/* Page Heading */}
@@ -617,64 +757,50 @@ export default function SettingsPage() {
 
           <form onSubmit={handleUpdateProfile} className="settings-form-col">
             {profileError && (
-              <div className="auth-message-block error" style={{ marginBottom: "1rem" }}>
-                <CloseIcon size={13} />
-                <span>{profileError}</span>
-              </div>
+              <FormMessage message={profileError} type="error" style={{ marginBottom: "1rem" }} />
             )}
 
             {profileSuccess && (
-              <div className="auth-message-block success" style={{ marginBottom: "1rem" }}>
-                <CheckIcon size={13} />
-                <span>Profile updated successfully.</span>
-              </div>
+              <FormMessage message="Profile updated successfully." type="success" style={{ marginBottom: "1rem" }} />
             )}
 
-            <div className="form-group-block">
-              <label htmlFor="display-name">Full name / Username</label>
-              <input
-                id="display-name"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                className="figma-text-input"
-                required
-                minLength={2}
-                maxLength={50}
-                placeholder="e.g. Jane Doe"
-              />
-              <span className="field-constraint-hint">2-50 characters (letters, numbers, hyphens, and underscores)</span>
-            </div>
+            <TextInput
+              id="display-name"
+              label="Full name / Username"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              required
+              minLength={2}
+              maxLength={50}
+              placeholder="e.g. Jane Doe"
+              helperText="2-50 characters (letters, numbers, hyphens, and underscores)"
+              className="form-group-block"
+            />
 
-            <div className="form-group-block">
-              <label htmlFor="email">Email address</label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="figma-text-input"
-                required
-                placeholder="developer@deployforge.dev"
-              />
-              <span className="field-constraint-hint">Used for deployment notifications and digest reports</span>
-            </div>
+            <TextInput
+              id="email"
+              type="email"
+              label="Email address"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              placeholder="developer@deployforge.dev"
+              helperText="Used for deployment notifications and digest reports"
+              className="form-group-block"
+            />
 
             {/* Password Verification to authorize username/email change */}
-            <div className="form-group-block" style={{ marginTop: "16px", padding: "14px", background: "#111114", border: "1px solid var(--border-default)", borderRadius: "var(--radius-xs)" }}>
-              <label htmlFor="verify-pass" style={{ color: "#ffffff", fontWeight: "600" }}>
-                Current password to authorize changes
-              </label>
-              <input
+            <div className="form-group-block" style={{ marginTop: "16px", padding: "14px", background: "var(--bg-surface, #111114)", border: "1px solid var(--border-default)", borderRadius: "var(--radius-xs)" }}>
+              <TextInput
                 id="verify-pass"
                 type="password"
+                label="Current password to authorize changes"
                 required
                 value={profilePassword}
                 onChange={(e) => setProfilePassword(e.target.value)}
-                className="figma-text-input"
                 placeholder="Enter current password to verify identity"
-                style={{ marginTop: "6px" }}
+                helperText="Your password is required to confirm username or email modifications."
               />
-              <span className="field-constraint-hint">Your password is required to confirm username or email modifications.</span>
             </div>
 
             {/* Connected Accounts: GitHub Profile Linking */}
@@ -682,17 +808,11 @@ export default function SettingsPage() {
               <h3 className="sub-section-title">Connected Accounts</h3>
 
               {githubError && (
-                <div className="auth-message-block error" style={{ margin: "8px 0" }}>
-                  <CloseIcon size={12} />
-                  <span>{githubError}</span>
-                </div>
+                <FormMessage message={githubError} type="error" style={{ margin: "8px 0" }} />
               )}
 
               {githubSuccess && (
-                <div className="auth-message-block success" style={{ margin: "8px 0" }}>
-                  <CheckIcon size={12} />
-                  <span>{githubSuccess}</span>
-                </div>
+                <FormMessage message={githubSuccess} type="success" style={{ margin: "8px 0" }} />
               )}
 
               {githubConnected ? (
@@ -721,6 +841,7 @@ export default function SettingsPage() {
                       className="btn-secondary btn-sm"
                       onClick={handleDisconnectGitHub}
                       title="Disconnect GitHub account"
+                      aria-label="Disconnect GitHub account"
                     >
                       Disconnect
                     </button>
@@ -740,6 +861,7 @@ export default function SettingsPage() {
                       type="button"
                       className="btn-secondary btn-sm"
                       onClick={() => setIsLinkingGithub(!isLinkingGithub)}
+                      aria-label={isLinkingGithub ? "Cancel linking GitHub profile" : "Link GitHub profile"}
                     >
                       {isLinkingGithub ? "Cancel" : "Link Profile"}
                     </button>
@@ -748,22 +870,24 @@ export default function SettingsPage() {
                   {isLinkingGithub && (
                     <div className="github-link-form">
                       <div className="github-link-inputs">
-                        <input
-                          type="text"
+                        <TextInput
+                          id="github-profile"
                           value={githubInput}
                           onChange={(e) => {
                             setGithubInput(e.target.value);
                             if (githubError) setGithubError("");
                           }}
+                          prefixIcon={GitHubIcon}
                           placeholder="https://github.com/username or @username"
-                          className="figma-text-input"
-                          style={githubError ? { borderColor: "#ef4444" } : {}}
+                          error={githubError}
+                          style={{ flex: 1 }}
                         />
                         <button
                           type="button"
                           className="btn-primary btn-sm"
                           onClick={handleLinkGitHub}
                           disabled={githubLinking}
+                          style={{ height: "42px" }}
                         >
                           {githubLinking ? (
                             <>
@@ -810,69 +934,57 @@ export default function SettingsPage() {
 
           <form onSubmit={handleUpdatePassword} className="settings-form-col">
             {passwordError && (
-              <div className="auth-message-block error" style={{ marginBottom: "1rem" }}>
-                <CloseIcon size={13} />
-                <span>{passwordError}</span>
-              </div>
+              <FormMessage message={passwordError} type="error" style={{ marginBottom: "1rem" }} />
             )}
 
             {passwordSuccess && (
-              <div className="auth-message-block success" style={{ marginBottom: "1rem" }}>
-                <CheckIcon size={13} />
-                <span>Password updated successfully.</span>
-              </div>
+              <FormMessage message="Password updated successfully." type="success" style={{ marginBottom: "1rem" }} />
             )}
 
-            <div className="form-group-block">
-              <label htmlFor="current-pass">Current password</label>
-              <input
-                id="current-pass"
-                type="password"
-                value={currentPassword}
-                onChange={(e) => {
-                  setCurrentPassword(e.target.value);
-                  if (passwordError) setPasswordError("");
-                }}
-                className="figma-text-input"
-                required
-                placeholder="••••••••••••"
-              />
-            </div>
+            <TextInput
+              id="current-pass"
+              label="Current password"
+              type="password"
+              value={currentPassword}
+              onChange={(e) => {
+                setCurrentPassword(e.target.value);
+                if (passwordError) setPasswordError("");
+              }}
+              required
+              placeholder="••••••••••••"
+              className="form-group-block"
+            />
 
-            <div className="form-group-block">
-              <label htmlFor="new-pass">New password</label>
-              <input
-                id="new-pass"
-                type="password"
-                value={newPassword}
-                onChange={(e) => {
-                  setNewPassword(e.target.value);
-                  if (passwordError) setPasswordError("");
-                }}
-                className="figma-text-input"
-                required
-                minLength={8}
-                maxLength={128}
-                placeholder="••••••••••••"
-              />
-              <span className="field-constraint-hint">Must be at least 8 characters and include at least one letter and one number</span>
-            </div>
+            <TextInput
+              id="new-pass"
+              label="New password"
+              type="password"
+              value={newPassword}
+              onChange={(e) => {
+                setNewPassword(e.target.value);
+                if (passwordError) setPasswordError("");
+              }}
+              required
+              minLength={8}
+              maxLength={128}
+              placeholder="••••••••••••"
+              helperText="Must be at least 8 characters and include at least one letter and one number"
+              className="form-group-block"
+            />
 
-            <div className="form-group-block">
-              <label htmlFor="confirm-pass">Confirm new password</label>
-              <input
-                id="confirm-pass"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => {
-                  setConfirmPassword(e.target.value);
-                  if (passwordError) setPasswordError("");
-                }}
-                className="figma-text-input"
-                required
-                placeholder="••••••••••••"
-              />
-            </div>
+            <TextInput
+              id="confirm-pass"
+              label="Confirm new password"
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                if (passwordError) setPasswordError("");
+              }}
+              required
+              placeholder="••••••••••••"
+              className="form-group-block"
+            />
 
             <div className="save-action-row">
               <button type="submit" className="btn-primary" disabled={passwordLoading}>
@@ -1011,30 +1123,47 @@ export default function SettingsPage() {
             {/* Single Var Add Drawer with Key Constraints */}
             {isAddingVar && (
               <form onSubmit={handleAddVariable} className="add-variable-drawer" style={{ flexDirection: "column", gap: "10px" }}>
-                {varKeyError && (
-                  <span className="field-error-text">
-                    <CloseIcon size={11} />
-                    <span>{varKeyError}</span>
-                  </span>
-                )}
-                <div style={{ display: "flex", gap: "12px" }}>
-                  <input
+                <div style={{ display: "flex", gap: "12px", width: "100%", alignItems: "flex-start" }}>
+                  <TextInput
+                    id="new-var-key"
                     required
+                    monospace
                     placeholder="KEY (e.g. DATABASE_URL)"
                     value={newVarKey}
                     onChange={(e) => {
-                      setNewVarKey(e.target.value.toUpperCase());
+                      setNewVarKey(e.target.value);
                       if (varKeyError) setVarKeyError("");
                     }}
-                    className="add-var-key"
-                    style={varKeyError ? { borderColor: "#ef4444" } : {}}
+                    onPaste={handleKeyPaste}
+                    error={varKeyError}
+                    style={{ flex: "0 0 240px" }}
                   />
-                  <input
+                  <TextInput
+                    id="new-var-val"
                     required
+                    type={showNewVarVal ? "text" : "password"}
                     placeholder="VALUE"
                     value={newVarVal}
                     onChange={(e) => setNewVarVal(e.target.value)}
-                    className="add-var-val"
+                    style={{ flex: 1 }}
+                    suffix={
+                      <button
+                        type="button"
+                        onClick={() => setShowNewVarVal(!showNewVarVal)}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "var(--text-tertiary)",
+                          cursor: "pointer",
+                          padding: "2px",
+                          display: "flex",
+                          alignItems: "center",
+                        }}
+                        aria-label={showNewVarVal ? "Hide new variable value" : "Reveal new variable value"}
+                      >
+                        {showNewVarVal ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
+                      </button>
+                    }
                   />
                 </div>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1099,7 +1228,7 @@ export default function SettingsPage() {
                               type="button"
                               className="reveal-btn"
                               onClick={() => handleToggleSecret(v.id, v.key)}
-                              aria-label={isRevealed ? "Mask value" : "Reveal value"}
+                              aria-label={isRevealed ? `Hide value for variable ${v.key}` : `Reveal value for variable ${v.key}`}
                             >
                               {isRevealed ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
                             </button>
@@ -1113,7 +1242,7 @@ export default function SettingsPage() {
                             type="button"
                             className="tbl-action-btn delete"
                             onClick={() => handleDeleteVariable(v.key, v.id)}
-                            aria-label={`Delete ${v.key}`}
+                            aria-label={`Remove environment variable ${v.key}`}
                             title="Delete secret"
                           >
                             <TrashIcon size={13} />
@@ -1143,63 +1272,101 @@ export default function SettingsPage() {
 
           <div className="settings-form-col">
             {domainError && (
-              <div className="auth-message-block error" style={{ marginBottom: "0.75rem" }}>
-                <CloseIcon size={13} />
-                <span>{domainError}</span>
-              </div>
+              <FormMessage message={domainError} type="error" style={{ marginBottom: "0.75rem" }} />
             )}
 
             <div className="domains-table-card">
-              {domains.map((d) => (
-                <div key={d.id || d.domain} className="domain-row-item">
-                  <div className="domain-name-block">
-                    <strong className="domain-txt">{d.domain}</strong>
-                    {d.is_default || d.isDefault ? (
-                      <span className="default-pill">System Default</span>
-                    ) : null}
-                  </div>
-                  <div className="domain-status-block">
-                    <StatusBadge value={d.status} size="sm" />
-                    <a
-                      href={`https://${d.domain}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="tbl-action-btn"
-                      aria-label={`Open https://${d.domain}`}
-                    >
-                      <ExternalLinkIcon size={13} />
-                    </a>
-                    {!(d.is_default || d.isDefault) && (
+              {domains.map((d) => {
+                const matchedRoute = activeRoutes.find((r) => r.domain === d.domain);
+                const health = domainHealth[d.domain];
+                return (
+                  <div key={d.id || d.domain} className="domain-row-item">
+                    <div className="domain-name-block">
+                      <strong className="domain-txt">{d.domain}</strong>
+                      {d.is_default || d.isDefault ? (
+                        <span className="default-pill">System Default</span>
+                      ) : null}
+                      {matchedRoute && (
+                        <span style={{ fontSize: "11px", color: "var(--text-tertiary)", marginLeft: "6px" }}>
+                          <code>{matchedRoute.target_host}:{matchedRoute.port}</code>
+                        </span>
+                      )}
+                      {health && (
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                            marginLeft: "6px",
+                            color: health.healthy ? "var(--accent-emerald, #10b981)" : "#ef4444",
+                          }}
+                        >
+                          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
+                          {health.healthy ? `Probe OK (${health.latency_ms ? `${health.latency_ms}ms` : "200"})` : "Probe Failed"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="domain-status-block">
+                      <StatusBadge value={d.status} size="sm" />
                       <button
                         type="button"
-                        className="tbl-action-btn delete"
-                        onClick={() => handleDeleteDomain(d.id, d.domain)}
-                        aria-label={`Remove domain ${d.domain}`}
-                        title="Remove domain"
+                        className="tbl-action-btn"
+                        onClick={() => handleProbeDomain(d.domain, d.project_id)}
+                        disabled={probingDomain === d.domain}
+                        title="Probe Nginx & container health via /api/routing"
+                        aria-label={`Probe health for domain ${d.domain}`}
+                        style={{ padding: "3px 7px", fontSize: "11px" }}
                       >
-                        <TrashIcon size={13} />
+                        {probingDomain === d.domain ? (
+                          <SpinnerIcon size={12} className="spin" />
+                        ) : (
+                          <span>Probe</span>
+                        )}
                       </button>
-                    )}
+                      <a
+                        href={`https://${d.domain}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="tbl-action-btn"
+                        aria-label={`Open https://${d.domain} in new tab`}
+                      >
+                        <ExternalLinkIcon size={13} />
+                      </a>
+                      {!(d.is_default || d.isDefault) && (
+                        <button
+                          type="button"
+                          className="tbl-action-btn delete"
+                          onClick={() => handleDeleteDomain(d.id, d.domain)}
+                          aria-label={`Remove domain ${d.domain}`}
+                          title="Remove domain"
+                        >
+                          <TrashIcon size={13} />
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {isAddingDomain ? (
-              <form onSubmit={handleAddDomain} className="add-domain-inline-form">
-                <input
+              <form onSubmit={handleAddDomain} className="add-domain-inline-form" style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                <TextInput
+                  id="new-domain-input"
                   required
+                  monospace
                   placeholder="app.yourdomain.com"
                   value={newDomain}
                   onChange={(e) => {
                     setNewDomain(e.target.value);
                     if (domainError) setDomainError("");
                   }}
-                  className="figma-text-input"
-                  style={domainError ? { borderColor: "#ef4444" } : {}}
+                  error={domainError}
+                  style={{ flex: 1 }}
                 />
-                <div className="add-domain-btns">
-                  <button type="submit" className="btn-primary btn-sm" disabled={domainLoading}>
+                <div className="add-domain-btns" style={{ marginTop: 0 }}>
+                  <button type="submit" className="btn-primary btn-sm" disabled={domainLoading} style={{ height: "42px" }}>
                     {domainLoading ? (
                       <>
                         <SpinnerIcon size={12} className="spin" />
@@ -1216,6 +1383,7 @@ export default function SettingsPage() {
                       setIsAddingDomain(false);
                       setDomainError("");
                     }}
+                    style={{ height: "42px" }}
                   >
                     Cancel
                   </button>
@@ -1352,7 +1520,182 @@ export default function SettingsPage() {
             </div>
           </div>
         </section>
+
+        {/* Section 7: Danger Zone */}
+        {activeProject && (
+          <section
+            className="settings-section-card"
+            aria-label="Danger zone"
+            style={{ borderColor: "rgba(239, 68, 68, 0.35)", background: "rgba(239, 68, 68, 0.02)" }}
+          >
+            <div className="settings-intro-col">
+              <h2 className="section-col-title" style={{ color: "#ef4444" }}>Danger Zone</h2>
+              <p className="section-col-desc">
+                Destructive operations for project <code>{activeProject.name}</code>. These actions cannot be undone.
+              </p>
+            </div>
+
+            <div className="settings-form-col">
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "1rem",
+                  padding: "1rem",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid rgba(239, 68, 68, 0.2)",
+                  background: "rgba(0, 0, 0, 0.25)",
+                }}
+              >
+                <div>
+                  <strong style={{ display: "block", color: "var(--text-primary)", fontSize: "0.875rem", marginBottom: "0.25rem" }}>
+                    Delete Project "{activeProject.name}"
+                  </strong>
+                  <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
+                    Permanently delete this project along with all associated container resources, deployments, build logs, and environment secrets.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{
+                    color: "#ef4444",
+                    borderColor: "rgba(239, 68, 68, 0.35)",
+                    flexShrink: 0,
+                  }}
+                  onClick={() => {
+                    setShowDeleteModal(true);
+                    setDeleteConfirmationText("");
+                    setDeleteError("");
+                  }}
+                  aria-label={`Delete project ${activeProject.name}`}
+                >
+                  <TrashIcon size={13} />
+                  <span>Delete Project</span>
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
+
+      {/* Danger Zone: Project Deletion Modal */}
+      {showDeleteModal && activeProject && (
+        <div
+          className="df-cmd-backdrop"
+          onClick={() => {
+            if (!isDeletingProject) {
+              setShowDeleteModal(false);
+              setDeleteConfirmationText("");
+              setDeleteError("");
+            }
+          }}
+          style={{ zIndex: 9999 }}
+        >
+          <div
+            className="df-cmd-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-project-dialog-title"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "480px", padding: "1.5rem" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <div style={{ width: "32px", height: "32px", borderRadius: "8px", background: "rgba(239, 68, 68, 0.15)", display: "flex", alignItems: "center", justifyContent: "center", color: "#ef4444" }}>
+                  <TrashIcon size={16} />
+                </div>
+                <h3 id="delete-project-dialog-title" style={{ margin: 0, fontSize: "1.125rem", fontWeight: 600, color: "var(--text-primary)" }}>
+                  Delete Project
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="search-clear-btn"
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setDeleteConfirmationText("");
+                  setDeleteError("");
+                }}
+                disabled={isDeletingProject}
+                aria-label="Close delete confirmation dialog"
+              >
+                <CloseIcon size={14} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.5, marginBottom: "1rem" }}>
+              This action cannot be undone. This will permanently delete the project{" "}
+              <strong style={{ color: "var(--text-primary)" }}>{activeProject.name}</strong>, destroy active containers,
+              and purge all associated build logs, deployments, and vault variables.
+            </p>
+
+            {deleteError && (
+              <FormMessage message={deleteError} type="error" style={{ marginBottom: "1rem" }} />
+            )}
+
+            <form onSubmit={handleDeleteProject}>
+              <label
+                htmlFor="confirm-delete-project-input"
+                style={{ display: "block", fontSize: "0.8125rem", color: "var(--text-secondary)", marginBottom: "0.5rem" }}
+              >
+                To confirm, type <strong style={{ color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>{activeProject.name}</strong> below:
+              </label>
+
+              <TextInput
+                id="confirm-delete-project-input"
+                monospace
+                autoFocus
+                value={deleteConfirmationText}
+                onChange={(e) => {
+                  setDeleteConfirmationText(e.target.value);
+                  if (deleteError) setDeleteError("");
+                }}
+                placeholder={activeProject.name}
+                disabled={isDeletingProject}
+                style={{ marginBottom: "1.25rem" }}
+              />
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.75rem" }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={isDeletingProject}
+                  onClick={() => {
+                    setShowDeleteModal(false);
+                    setDeleteConfirmationText("");
+                    setDeleteError("");
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  style={{
+                    backgroundColor: "#ef4444",
+                    borderColor: "#ef4444",
+                    color: "#ffffff",
+                    opacity: deleteConfirmationText.trim() !== activeProject.name || isDeletingProject ? 0.5 : 1,
+                    cursor: deleteConfirmationText.trim() !== activeProject.name || isDeletingProject ? "not-allowed" : "pointer",
+                  }}
+                  disabled={deleteConfirmationText.trim() !== activeProject.name || isDeletingProject}
+                >
+                  {isDeletingProject ? (
+                    <>
+                      <SpinnerIcon size={14} className="spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <span>I understand, delete this project</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

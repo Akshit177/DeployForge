@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
+import FormMessage from "../components/common/FormMessage.jsx";
 import { fetchDeployments, triggerDeployment, cancelDeployment } from "../services/deploymentService.js";
 import {
   SearchIcon,
@@ -26,64 +27,131 @@ function timeAgo(dateString) {
   return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
-export default function DeploymentsPage({ navigate }) {
+const FILTER_OPTIONS = ["All", "Succeeded", "Building", "Queued", "Failed", "Stopped"];
+
+function getFilterFromParam(params) {
+  const p = params?.get("status");
+  if (!p) return "All";
+  const match = FILTER_OPTIONS.find((opt) => opt.toLowerCase() === p.toLowerCase());
+  return match || "All";
+}
+
+export default function DeploymentsPage({ navigate, searchParams }) {
   const [deployments, setDeployments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedProject, setSelectedProject] = useState("All projects");
-  const [filter, setFilter] = useState("All");
+  const [filter, setFilter] = useState(() => getFilterFromParam(searchParams));
   const [query, setQuery] = useState("");
   const [copiedId, setCopiedId] = useState(null);
   const [actioningId, setActioningId] = useState(null);
   const [notice, setNotice] = useState(null);
 
-  const pollTimerRef = useRef(null);
+  useEffect(() => {
+    const nextFilter = getFilterFromParam(searchParams);
+    setFilter(nextFilter);
+  }, [searchParams]);
 
-  const loadData = async (isBackground = false) => {
+  const pollTimerRef = useRef(null);
+  const pollAbortRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  const loadData = async (isBackground = false, signal = null) => {
     try {
       if (!isBackground) setLoading(true);
       setError(null);
-      const data = await fetchDeployments();
-      setDeployments(data);
+      const data = await fetchDeployments({}, { signal });
+      if (isMountedRef.current && !signal?.aborted) {
+        setDeployments(data);
+      }
     } catch (err) {
-      console.warn("Could not load deployments:", err.message);
-      if (!isBackground) setError(err.message);
+      if (err.name !== "AbortError" && isMountedRef.current) {
+        console.warn("Could not load deployments:", err.message);
+        if (!isBackground) setError(err.message);
+      }
     } finally {
-      if (!isBackground) setLoading(false);
+      if (!isBackground && isMountedRef.current && !signal?.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    loadData();
+    isMountedRef.current = true;
+    const initialAbort = new AbortController();
+    loadData(false, initialAbort.signal);
+
     return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      isMountedRef.current = false;
+      initialAbort.abort();
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
+      }
     };
   }, []);
 
-  // Poll while any deployment is in active build/deploy pipeline
+  // Poll while any deployment is in active build/deploy pipeline, pausing when tab is hidden
   useEffect(() => {
     const hasActive = deployments.some((d) => {
       const s = (d.status || d.state || "").toLowerCase().trim();
       return ["initiated", "queued", "cloning", "building", "starting", "deploying"].includes(s);
     });
 
-    if (hasActive) {
-      if (!pollTimerRef.current) {
-        pollTimerRef.current = setInterval(() => {
-          loadData(true);
-        }, 3500);
-      }
-    } else {
+    if (!hasActive) {
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
+        clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
+      }
+      return;
     }
 
+    let isPolling = true;
+
+    const schedulePoll = () => {
+      if (!isPolling || !isMountedRef.current) return;
+      pollTimerRef.current = setTimeout(async () => {
+        if (!isPolling || !isMountedRef.current) return;
+        // Pause if document is hidden (background tab)
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+          schedulePoll();
+          return;
+        }
+
+        if (pollAbortRef.current) {
+          pollAbortRef.current.abort();
+        }
+        pollAbortRef.current = new AbortController();
+
+        try {
+          await loadData(true, pollAbortRef.current.signal);
+        } finally {
+          if (isPolling && isMountedRef.current) {
+            schedulePoll();
+          }
+        }
+      }, 3500);
+    };
+
+    schedulePoll();
+
     return () => {
+      isPolling = false;
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
+        clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
+      }
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+        pollAbortRef.current = null;
       }
     };
   }, [deployments]);
@@ -115,6 +183,20 @@ export default function DeploymentsPage({ navigate }) {
       return matchProject && matchFilter && matchQuery;
     });
   }, [deployments, selectedProject, filter, query]);
+
+  const handleFilterChange = (key) => {
+    setFilter(key);
+    if (navigate) {
+      const sp = new URLSearchParams(searchParams ? searchParams.toString() : "");
+      if (key === "All") {
+        sp.delete("status");
+      } else {
+        sp.set("status", key.toLowerCase());
+      }
+      const qs = sp.toString();
+      navigate(qs ? `/deployments?${qs}` : "/deployments");
+    }
+  };
 
   const handleCopyId = (e, id) => {
     e.stopPropagation();
@@ -207,7 +289,7 @@ export default function DeploymentsPage({ navigate }) {
                 key={key}
                 type="button"
                 className={`filter-chip ${isSelected ? "selected" : ""}`}
-                onClick={() => setFilter(key)}
+                onClick={() => handleFilterChange(key)}
                 role="tab"
                 aria-selected={isSelected}
               >
@@ -233,22 +315,21 @@ export default function DeploymentsPage({ navigate }) {
               type="button"
               className="search-clear-btn"
               onClick={() => setQuery("")}
-              aria-label="Clear search"
+              aria-label="Clear deployment search query"
             >
-              <CloseIcon size={12} />
+              <CloseIcon size={12} aria-hidden="true" />
             </button>
           )}
         </div>
       </div>
 
       {error && (
-        <div className="auth-message-block error" style={{ marginBottom: "1.5rem" }}>
-          <span>Failed to load deployments: {error}</span>
+        <div style={{ marginBottom: "1.5rem", display: "flex", alignItems: "center", gap: "1rem" }}>
+          <FormMessage message={`Failed to load deployments: ${error}`} type="error" style={{ flex: 1 }} />
           <button
             type="button"
             className="btn-secondary btn-sm"
             onClick={() => loadData(false)}
-            style={{ marginLeft: "1rem" }}
           >
             Retry
           </button>
@@ -256,8 +337,9 @@ export default function DeploymentsPage({ navigate }) {
       )}
 
       {/* Deployments Table Container */}
-      <div className="deployments-table-card">
-        <div className="table-header-row">
+      <div className="table-responsive-wrapper df-table-scroll">
+        <div className="deployments-table-card">
+          <div className="table-header-row">
           <div className="th-cell th-id">Deployment</div>
           <div className="th-cell th-msg">Commit & Project</div>
           <div className="th-cell th-status">Status</div>
@@ -293,33 +375,35 @@ export default function DeploymentsPage({ navigate }) {
                   }
                 >
                   <div className="cell-item cell-id">
-                    <span
+                    <button
+                      type="button"
                       className="dep-id-pill"
                       onClick={(e) => handleCopyId(e, displayId)}
                       title="Click to copy ID"
+                      aria-label={copiedId === displayId ? `Copied deployment ID ${displayId}` : `Copy deployment ID ${displayId}`}
                     >
-                      <code>{displayId}</code>
+                      <code className="truncate-mono">{displayId}</code>
                       {copiedId === displayId ? (
                         <span className="copied-tag">Copied</span>
                       ) : (
-                        <CopyIcon size={11} className="copy-icon-hover" />
+                        <CopyIcon size={11} className="copy-icon-hover" aria-hidden="true" />
                       )}
-                    </span>
+                    </button>
                   </div>
 
                   <div className="cell-item cell-msg">
-                    <strong className="dep-commit-msg">{d.message}</strong>
+                    <strong className="dep-commit-msg truncate-mono">{d.message}</strong>
                     <div className="dep-meta-row">
                       <span className="dep-project-tag">{d.project || d.projectName}</span>
                       <span className="dot-sep">·</span>
                       <span className="dep-branch-tag">
-                        <GitBranchIcon size={11} className="branch-svg" />
+                        <GitBranchIcon size={11} className="branch-svg" aria-hidden="true" />
                         <span>{d.branch}</span>
                       </span>
                       <span className="dot-sep">·</span>
                       <span className="dep-commit-sha">
-                        <CommitIcon size={10} className="commit-svg" />
-                        <code>{d.commit}</code>
+                        <CommitIcon size={10} className="commit-svg" aria-hidden="true" />
+                        <code className="truncate-mono">{d.commit}</code>
                       </span>
                     </div>
                   </div>
@@ -334,7 +418,7 @@ export default function DeploymentsPage({ navigate }) {
 
                   <div className="cell-item cell-time">
                     <span className="time-text">
-                      <ClockIcon size={11} className="clock-svg" />
+                      <ClockIcon size={11} className="clock-svg" aria-hidden="true" />
                       <span>{timeDisplay}</span>
                     </span>
                   </div>
@@ -358,8 +442,9 @@ export default function DeploymentsPage({ navigate }) {
                         onClick={(e) => handleCancel(e, d)}
                         disabled={isActioning}
                         title="Cancel ongoing deployment"
+                        aria-label={`Cancel deployment ${displayId}`}
                       >
-                        {isActioning ? <SpinnerIcon size={11} className="spin" /> : <PauseIcon size={11} />}
+                        {isActioning ? <SpinnerIcon size={11} className="spin" aria-hidden="true" /> : <PauseIcon size={11} aria-hidden="true" />}
                         <span>Cancel</span>
                       </button>
                     ) : (
@@ -369,8 +454,9 @@ export default function DeploymentsPage({ navigate }) {
                         onClick={(e) => handleRedeploy(e, d)}
                         disabled={isActioning}
                         title="Redeploy this release"
+                        aria-label={`Redeploy release ${displayId}`}
                       >
-                        {isActioning ? <SpinnerIcon size={11} className="spin" /> : <PlayIcon size={11} />}
+                        {isActioning ? <SpinnerIcon size={11} className="spin" aria-hidden="true" /> : <PlayIcon size={11} aria-hidden="true" />}
                         <span>Redeploy</span>
                       </button>
                     )}
@@ -424,5 +510,6 @@ export default function DeploymentsPage({ navigate }) {
         </div>
       </div>
     </div>
-  );
+  </div>
+);
 }

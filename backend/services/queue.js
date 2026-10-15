@@ -49,8 +49,11 @@ async function publishDeploymentJob(payload) {
     const messageId = await redis.xadd(STREAM_NAME, "*", ...fields);
     return messageId;
   } catch (error) {
-    console.warn("Redis XADD failed, using fallback:", error.message);
-    return `local-${Date.now()}`;
+    if (process.env.ALLOW_REDIS_FALLBACK === "true") {
+      console.warn("Redis XADD failed, using fallback:", error.message);
+      return `local-${Date.now()}`;
+    }
+    throw error;
   }
 }
 
