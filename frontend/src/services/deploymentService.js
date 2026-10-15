@@ -26,15 +26,9 @@ export async function cancelDeployment(id, options = {}) {
   return result.deployment;
 }
 
-export async function updateDeploymentStatus(id, payload, options = {}) {
-  const result = await apiClient.patch(`/api/deployments/${id}/status`, payload, options);
-  return result.deployment;
-}
-
 export default {
   fetchDeployments,
   getDeployment,
   triggerDeployment,
   cancelDeployment,
-  updateDeploymentStatus,
 };

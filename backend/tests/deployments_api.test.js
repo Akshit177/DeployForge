@@ -130,25 +130,31 @@ async function runTestSuite() {
     const singleDataNum = await singleResNum.json();
     assert(singleResNum.status === 200 && singleDataNum.deployment.id === deployId1, "Lookup by deployment number succeeded");
 
-    // 8. Lifecycle state transitions: Queued -> Building -> Running
-    const patchBuilding = await fetch(`${baseUrl}/api/deployments/${deployId1}/status`, {
+    // 8. Verify PATCH /api/deployments/:id/status is removed (404)
+    const patchAttempt = await fetch(`${baseUrl}/api/deployments/${deployId1}/status`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
       body: JSON.stringify({ status: "Building", duration_seconds: 15 }),
     });
-    assert(patchBuilding.status === 200, "Transitioned status to Building");
+    assert(patchAttempt.status === 404, "PATCH /api/deployments/:id/status returns 404 (removed)");
 
-    const patchRunning = await fetch(`${baseUrl}/api/deployments/${deployId1}/status`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", Cookie: tokenCookieA },
-      body: JSON.stringify({
-        status: "Running",
-        duration_seconds: 48,
-        container_id: "cont-12345-abc",
-      }),
+    // Simulate worker/consumer updating durable state to Running
+    await pool.query(
+      `UPDATE deployments
+       SET status = 'Running', duration_seconds = 48, container_id = 'cont-12345-abc', updated_at = NOW()
+       WHERE id = $1`,
+      [deployId1]
+    );
+    await pool.query(
+      `UPDATE projects SET status = 'Running', updated_at = NOW() WHERE id = $1`,
+      [projectId]
+    );
+
+    const getRunning = await fetch(`${baseUrl}/api/deployments/${deployId1}`, {
+      headers: { Cookie: tokenCookieA },
     });
-    assert(patchRunning.status === 200, "Transitioned status to Running");
-    const runningData = await patchRunning.json();
+    assert(getRunning.status === 200, "Retrieved updated deployment details");
+    const runningData = await getRunning.json();
     assert(runningData.deployment.serving === true, "Deployment marked as currently serving traffic");
     assert(runningData.deployment.duration === "48s", "Deployment duration formatted properly");
 

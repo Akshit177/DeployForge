@@ -38,16 +38,6 @@ async function recordLog(deploymentId, projectId, userId, level, source, message
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ALLOWED_STATUSES = [
-  "Queued",
-  "Building",
-  "Deploying",
-  "Running",
-  "Failed",
-  "Cancelled",
-  "Stopped",
-  "Succeeded",
-];
 
 function formatDuration(seconds) {
   if (!seconds || seconds <= 0) return "—";
@@ -361,100 +351,6 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// PATCH /api/deployments/:id/status - Update deployment status lifecycle
-router.patch("/:id/status", async (req, res) => {
-  const { id } = req.params;
-  const { status, duration_seconds, error_message, container_id, url } = req.body;
-
-  if (!UUID_REGEX.test(id) && !/^\d+$/.test(id)) {
-    return res.status(400).json({ message: "Invalid deployment ID format." });
-  }
-
-  if (!status || !ALLOWED_STATUSES.includes(status)) {
-    return res.status(400).json({
-      message: `Invalid status. Must be one of: ${ALLOWED_STATUSES.join(", ")}`,
-    });
-  }
-
-  try {
-    // Check ownership
-    const checkQuery = `
-      SELECT d.*, p.id AS project_id
-      FROM deployments d
-      JOIN projects p ON d.project_id = p.id
-      WHERE ${UUID_REGEX.test(id) ? "d.id = $1" : "d.deployment_number = $1"} AND d.user_id = $2
-    `;
-    const check = await pool.query(checkQuery, [id, req.user.id]);
-
-    if (check.rows.length === 0) {
-      return res.status(404).json({ message: "Deployment not found." });
-    }
-
-    const current = check.rows[0];
-    const newDuration = duration_seconds !== undefined ? Number(duration_seconds) : current.duration_seconds;
-    const newError = error_message !== undefined ? error_message : current.error_message;
-    const newContainer = container_id !== undefined ? container_id : current.container_id;
-    const newUrl = url !== undefined ? url : current.url;
-
-    const updateRes = await pool.query(
-      `UPDATE deployments
-       SET status = $1,
-           duration_seconds = $2,
-           error_message = $3,
-           container_id = $4,
-           url = $5,
-           updated_at = NOW()
-       WHERE id = $6
-       RETURNING *`,
-      [status, newDuration, newError, newContainer, newUrl, current.id]
-    );
-
-    // Sync project status with the deployment state
-    const normalizedProjectStatus =
-      status === "Succeeded" ? "Running" : status === "Cancelled" ? "Failed" : status;
-    await pool.query(
-      `UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [normalizedProjectStatus, current.project_id]
-    );
-
-    const updated = updateRes.rows[0];
-
-    const logMsg =
-      status === "Building"
-        ? "Build worker allocated. Cloning repo and running Docker build..."
-        : status === "Deploying"
-        ? "Docker build succeeded. Spawning isolated container and routing Nginx..."
-        : status === "Running" || status === "Succeeded"
-        ? `Deployment #${updated.deployment_number} is healthy and serving live traffic at https://${updated.url || check.rows[0].project_domain}`
-        : status === "Failed"
-        ? `Deployment failed: ${newError || "Unknown build error"}`
-        : `Deployment status changed to ${status}`;
-
-    await recordLog(
-      current.id,
-      current.project_id,
-      req.user.id,
-      status === "Failed" ? "ERROR" : status === "Building" ? "STEP" : "INFO",
-      status === "Running" ? "deploy" : "build",
-      logMsg
-    );
-
-    return res.status(200).json({
-      message: `Deployment #${updated.deployment_number} transitioned to ${status}.`,
-      deployment: formatDeployment({
-        ...updated,
-        project_name: check.rows[0].project_name,
-        repository_url: check.rows[0].repository_url,
-        runtime: check.rows[0].runtime,
-        project_domain: check.rows[0].project_domain,
-      }),
-    });
-  } catch (error) {
-    console.error("Failed to update deployment status:", error);
-    return res.status(500).json({ message: "Unable to update deployment status." });
-  }
-});
-
 // POST /api/deployments/:id/cancel - Cancel active or queued deployment
 router.post("/:id/cancel", async (req, res) => {
   const { id } = req.params;
@@ -465,7 +361,7 @@ router.post("/:id/cancel", async (req, res) => {
 
   try {
     const checkQuery = `
-      SELECT d.*, p.id AS project_id
+      SELECT d.*, p.id AS project_id, p.domain AS project_domain
       FROM deployments d
       JOIN projects p ON d.project_id = p.id
       WHERE ${UUID_REGEX.test(id) ? "d.id = $1" : "d.deployment_number = $1"} AND d.user_id = $2
@@ -499,11 +395,11 @@ router.post("/:id/cancel", async (req, res) => {
 
     // Clean up container, route, and hot state on cancellation
     if (current.container_id) {
-      stopContainer(current.container_id).catch(() => {});
-      removeContainer(current.container_id).catch(() => {});
+      stopContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
+      removeContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
     }
 
-    const domainToUnregister = current.url || (check.rows[0] && check.rows[0].domain);
+    const domainToUnregister = current.project_domain;
     if (domainToUnregister) {
       unregisterUpstreamRoute(domainToUnregister);
     }
@@ -566,11 +462,11 @@ router.post("/:id/stop", async (req, res) => {
 
     // Clean up container, route, and hot state on stop
     if (current.container_id) {
-      stopContainer(current.container_id).catch(() => {});
-      removeContainer(current.container_id).catch(() => {});
+      stopContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
+      removeContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
     }
 
-    const domainToUnregister = current.url || current.project_domain;
+    const domainToUnregister = current.project_domain;
     if (domainToUnregister) {
       unregisterUpstreamRoute(domainToUnregister);
     }

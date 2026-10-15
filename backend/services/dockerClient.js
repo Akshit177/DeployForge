@@ -201,12 +201,42 @@ async function buildImage(contextPath, imageName, options = {}) {
  *   - NetworkingConfig connecting to config.networkName if provided
  * Simulator: sleep 100ms, return { containerId: 'sim_c_<random_12_hex>', containerName }
  */
+const simulatedContainers = new Map();
+
+/**
+ * Create and optionally start a container
+ * @param {object} config
+ * @param {string} config.imageName - image to use
+ * @param {string} config.containerName - name for the container (e.g., 'df-<deployment_id_short>')
+ * @param {number} config.containerPort - internal port the app listens on
+ * @param {object} [config.env] - environment variables as { KEY: 'value' }
+ * @param {string} [config.networkName] - Docker network to connect to
+ * @param {object} [config.resourceLimits] - { memoryMB: 512, cpuShares: 256, pidsLimit: 100 }
+ * @param {string} [config.deploymentId] - associated deployment ID for label assignment
+ * @param {object} [config.labels] - additional container labels
+ * @returns {Promise<{ containerId: string, containerName: string }>}
+ */
 async function createContainer(config) {
+  const deploymentId = config.deploymentId || "";
+  const labels = {
+    "deployforge.managed": "true",
+    ...(deploymentId ? { "deployforge.deployment_id": String(deploymentId) } : {}),
+    ...(config.labels || {}),
+  };
+
   if (getMode() === "simulator") {
     await sleep(100);
     const randomHex = crypto.randomBytes(6).toString("hex");
+    const containerId = `sim_c_${randomHex}`;
+    simulatedContainers.set(containerId, {
+      containerId,
+      containerName: config.containerName,
+      state: "running",
+      running: true,
+      labels,
+    });
     return {
-      containerId: `sim_c_${randomHex}`,
+      containerId,
       containerName: config.containerName,
     };
   }
@@ -250,6 +280,7 @@ async function createContainer(config) {
       },
       HostConfig: hostConfig,
       Env: envList,
+      Labels: labels,
     };
 
     if (config.networkName) {
@@ -298,21 +329,26 @@ async function startContainer(containerId) {
 /**
  * Inspect a running container
  * @param {string} containerId
- * @returns {Promise<{ state: string, running: boolean, ports: object, networkIp: string|null }>}
+ * @returns {Promise<{ state: string, running: boolean, ports: object, networkIp: string|null, labels: object }>}
  *
  * Real: container.inspect() — extract State.Status, State.Running,
- *       NetworkSettings.Networks[networkName].IPAddress
- * Simulator: return { state: 'running', running: true, ports: {}, networkIp: '172.20.0.' + random }
+ *       NetworkSettings.Networks[networkName].IPAddress, Config.Labels
+ * Simulator: return { state: 'running', running: true, ports: {}, networkIp: '172.20.0.' + random, labels }
  */
 async function inspectContainer(containerId) {
   if (getMode() === "simulator") {
     await sleep(50);
+    const sim = simulatedContainers.get(containerId);
+    const labels = sim
+      ? { ...sim.labels }
+      : (containerId && containerId.startsWith("sim_c_") ? { "deployforge.managed": "true" } : {});
     const randomHost = Math.floor(Math.random() * 200) + 2;
     return {
-      state: "running",
-      running: true,
+      state: sim ? sim.state : "running",
+      running: sim ? sim.running : true,
       ports: {},
       networkIp: `172.20.0.${randomHost}`,
+      labels,
     };
   }
 
@@ -324,6 +360,7 @@ async function inspectContainer(containerId) {
     const state = data.State ? data.State.Status : "unknown";
     const running = data.State ? Boolean(data.State.Running) : false;
     const ports = (data.NetworkSettings && data.NetworkSettings.Ports) || {};
+    const labels = (data.Config && data.Config.Labels) || {};
 
     let networkIp = null;
     if (data.NetworkSettings && data.NetworkSettings.Networks) {
@@ -345,6 +382,7 @@ async function inspectContainer(containerId) {
       running,
       ports,
       networkIp,
+      labels,
     };
   } catch (err) {
     throw new Error(`Failed to inspect container '${containerId}': ${err.message}`);
@@ -354,15 +392,33 @@ async function inspectContainer(containerId) {
 /**
  * Stop a running container
  * @param {string} containerId
- * @param {number} [timeoutSec=10]
+ * @param {number|object} [options=10] - timeoutSec number or { timeoutSec, expectedDeploymentId }
  * @returns {Promise<{ stopped: boolean }>}
  *
  * Real: container.stop({ t: timeoutSec })
  * Simulator: sleep 50ms, return { stopped: true }
  */
-async function stopContainer(containerId, timeoutSec = 10) {
+async function stopContainer(containerId, options = 10) {
+  const opts = typeof options === "number" ? { timeoutSec: options } : (options || {});
+  const timeoutSec = opts.timeoutSec !== undefined ? opts.timeoutSec : 10;
+  const expectedDeploymentId = opts.expectedDeploymentId;
+
+  const inspected = await inspectContainer(containerId);
+  const labels = inspected.labels || {};
+  if (labels["deployforge.managed"] !== "true") {
+    throw new Error(`Refusing to stop unmanaged container '${containerId}': missing deployforge.managed label`);
+  }
+  if (expectedDeploymentId && labels["deployforge.deployment_id"] && labels["deployforge.deployment_id"] !== expectedDeploymentId) {
+    throw new Error(`Refusing to stop container '${containerId}': deployment ID mismatch`);
+  }
+
   if (getMode() === "simulator") {
     await sleep(50);
+    const sim = simulatedContainers.get(containerId);
+    if (sim) {
+      sim.state = "stopped";
+      sim.running = false;
+    }
     return { stopped: true };
   }
 
@@ -382,15 +438,28 @@ async function stopContainer(containerId, timeoutSec = 10) {
 /**
  * Remove a container (must be stopped first)
  * @param {string} containerId
- * @param {object} [options] - { force: false, removeVolumes: true }
+ * @param {object} [options] - { force: false, removeVolumes: true, expectedDeploymentId }
  * @returns {Promise<{ removed: boolean }>}
  *
  * Real: container.remove({ force, v: removeVolumes })
  * Simulator: sleep 50ms, return { removed: true }
  */
 async function removeContainer(containerId, options = {}) {
+  const opts = options || {};
+  const expectedDeploymentId = opts.expectedDeploymentId;
+
+  const inspected = await inspectContainer(containerId);
+  const labels = inspected.labels || {};
+  if (labels["deployforge.managed"] !== "true") {
+    throw new Error(`Refusing to remove unmanaged container '${containerId}': missing deployforge.managed label`);
+  }
+  if (expectedDeploymentId && labels["deployforge.deployment_id"] && labels["deployforge.deployment_id"] !== expectedDeploymentId) {
+    throw new Error(`Refusing to remove container '${containerId}': deployment ID mismatch`);
+  }
+
   if (getMode() === "simulator") {
     await sleep(50);
+    simulatedContainers.delete(containerId);
     return { removed: true };
   }
 
@@ -398,8 +467,8 @@ async function removeContainer(containerId, options = {}) {
     const docker = getDocker();
     const container = docker.getContainer(containerId);
     await container.remove({
-      force: options.force || false,
-      v: options.removeVolumes !== undefined ? options.removeVolumes : true,
+      force: opts.force || false,
+      v: opts.removeVolumes !== undefined ? opts.removeVolumes : true,
     });
     return { removed: true };
   } catch (err) {

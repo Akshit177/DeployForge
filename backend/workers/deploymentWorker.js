@@ -297,6 +297,7 @@ async function processJob(jobData, messageId) {
       env: containerEnv,
       networkName: process.env.APP_NETWORK || "deployforge-apps",
       resourceLimits: { memoryMB: 512, cpuShares: 256, pidsLimit: 100 },
+      deploymentId: deployment_id,
     });
 
     await startContainer(containerResult.containerId);

@@ -75,4 +75,47 @@ describe('Docker Client — Simulator Mode', () => {
     assert.ok(result.containerId);
     assert.equal(result.containerName, 'df-limited');
   });
+
+  it('stopContainer refuses unmanaged containers without deployforge.managed label', async () => {
+    await assert.rejects(
+      async () => {
+        await stopContainer('deployforge-postgres');
+      },
+      {
+        message: /missing deployforge\.managed label/,
+      }
+    );
+  });
+
+  it('removeContainer refuses unmanaged containers without deployforge.managed label', async () => {
+    await assert.rejects(
+      async () => {
+        await removeContainer('deployforge-postgres');
+      },
+      {
+        message: /missing deployforge\.managed label/,
+      }
+    );
+  });
+
+  it('stopContainer verifies expectedDeploymentId matches container deployment label', async () => {
+    const created = await createContainer({
+      imageName: 'test-image:latest',
+      containerName: 'df-labeled-container',
+      containerPort: 3000,
+      deploymentId: 'dep-correct-id',
+    });
+
+    await assert.rejects(
+      async () => {
+        await stopContainer(created.containerId, { expectedDeploymentId: 'dep-mismatch-id' });
+      },
+      {
+        message: /deployment ID mismatch/,
+      }
+    );
+
+    const stopped = await stopContainer(created.containerId, { expectedDeploymentId: 'dep-correct-id' });
+    assert.equal(stopped.stopped, true);
+  });
 });
