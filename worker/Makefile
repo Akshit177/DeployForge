@@ -20,9 +20,11 @@ LIB_OBJS := $(filter-out $(OBJ_DIR)/main.o, $(OBJS))
 TARGET := $(BIN_DIR)/deployforge-worker
 TEST_TARGET := $(BIN_DIR)/test-worker
 
-.PHONY: all clean test
+.PHONY: all worker clean test
 
 all: $(TARGET) $(TEST_TARGET)
+
+worker: $(TARGET)
 
 $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)

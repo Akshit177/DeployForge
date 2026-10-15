@@ -103,3 +103,22 @@
   - `backend/tests/outbox_resilience.test.js`: Added 4 tests verifying `publishDeploymentJob` rejection on Redis failure, event staying `PENDING` with incrementing `retry_count` and exponential backoff during Redis outages, delivery to `PROCESSED` and deployment advancing to `QUEUED` upon Redis recovery, dead-lettering to `FAILED` after `MAX_RETRIES`, and reaping of stuck deployments.
 - **Verification result:** VERIFIED — Reproduction confirmed previous swallow behavior; full test suite (15 backend test files, 28 C++ worker tests, frontend build) all pass.
 - **Anything deferred:** None.
+
+### F-03: Worker image cannot build
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added `nlohmann-json` to builder `apk add` dependencies in `worker/Dockerfile`.
+  - Added `.PHONY: worker` and target `worker: $(TARGET)` in `worker/Makefile` to build only the worker binary without compiling unit test targets during container image builds.
+  - Updated `worker/Dockerfile` builder stage to invoke `make clean && make worker`.
+  - Configured production stage in `worker/Dockerfile` to run as non-root user `deployforge` in the `docker` group with appropriate directory ownership.
+  - Added `worker/.dockerignore` to exclude `.git`, `bin/`, `*.o`, and `tests/`.
+- **Files touched:**
+  - `worker/Dockerfile`
+  - `worker/Makefile`
+  - `worker/.dockerignore`
+- **Tests added / updated:**
+  - Verified Docker container image build: `docker build -t deployforge-worker-test worker/` succeeded and non-root execution confirmed.
+  - Ran C++ worker test suite: `make -C worker test` (28/28 passed).
+- **Verification result:** VERIFIED — `docker build -t deployforge-worker-test worker/` builds cleanly; C++ test suite passes.
+- **Anything deferred:** None.
