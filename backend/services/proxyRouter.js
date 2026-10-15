@@ -10,13 +10,19 @@ function registerUpstreamRoute(domain, routeInfo) {
   if (!domain) return;
   const normalizedDomain = domain.toLowerCase().trim();
 
+  const fallbackContainerName = routeInfo.deployment_id || routeInfo.deploymentId
+    ? `df-${String(routeInfo.deployment_id || routeInfo.deploymentId).replace(/-/g, "").slice(0, 12)}`
+    : null;
+  const containerName = routeInfo.container_name || routeInfo.containerName || fallbackContainerName;
+
   const entry = {
     domain: normalizedDomain,
     project_id: routeInfo.project_id || routeInfo.projectId,
     project_name: routeInfo.project_name || routeInfo.projectName || "app",
     deployment_id: routeInfo.deployment_id || routeInfo.deploymentId,
     container_id: routeInfo.container_id || routeInfo.containerId,
-    target_host: routeInfo.target_host || routeInfo.targetHost || "127.0.0.1",
+    container_name: containerName,
+    target_host: routeInfo.target_host || routeInfo.targetHost || containerName || "127.0.0.1",
     port: Number(routeInfo.port || 3000),
     status: routeInfo.status || "Healthy",
     registered_at: new Date().toISOString(),
@@ -72,7 +78,7 @@ async function syncFromDatabase() {
   try {
     const result = await pool.query(
       `SELECT p.id AS project_id, p.name AS project_name, p.domain, p.port,
-              d.id AS deployment_id, d.container_id, d.status AS deployment_status
+              d.id AS deployment_id, d.container_id, d.container_name, d.status AS deployment_status
        FROM projects p
        JOIN deployments d ON d.project_id = p.id AND UPPER(d.status) = 'RUNNING'
        ORDER BY d.created_at DESC`
@@ -80,12 +86,15 @@ async function syncFromDatabase() {
 
     for (const row of result.rows) {
       if (row.domain) {
+        const fallbackName = `df-${row.deployment_id.replace(/-/g, "").slice(0, 12)}`;
+        const containerName = row.container_name || fallbackName;
         registerUpstreamRoute(row.domain, {
           projectId: row.project_id,
           projectName: row.project_name,
           deploymentId: row.deployment_id,
           containerId: row.container_id || `c_${row.deployment_id.replace(/-/g, "").slice(0, 12)}`,
-          targetHost: "127.0.0.1",
+          containerName: containerName,
+          targetHost: containerName,
           port: row.port || 3000,
           status: "Healthy",
         });

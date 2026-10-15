@@ -141,7 +141,8 @@ void testRedisClient() {
 
     bool evOk = redis.publishEvent(
         "stream:test_cpp_events", "DEPLOYMENT_COMPLETED",
-        testDepId, "proj-123", "usr-123", "RUNNING", "running", "c_test_cid_123", "", 15
+        testDepId, "proj-123", "usr-123", "RUNNING", "running", "c_test_cid_123", "", 15,
+        "df-test-cid", "cpp-test.deployforge.app", 3000, "cpp-sample"
     );
     TEST_ASSERT(evOk, "Deployment event published to stream via XADD");
 
@@ -180,6 +181,10 @@ void testRedisClient() {
     TEST_ASSERT(parsedPayload["status"] == "RUNNING", "Payload JSON contains status RUNNING");
     TEST_ASSERT(parsedPayload["container_id"] == "c_test_cid_123", "Payload JSON contains container_id");
     TEST_ASSERT(parsedPayload["duration_seconds"] == 15, "Payload JSON contains duration_seconds");
+    TEST_ASSERT(parsedPayload["container_name"] == "df-test-cid", "Payload JSON contains container_name");
+    TEST_ASSERT(parsedPayload["domain"] == "cpp-test.deployforge.app", "Payload JSON contains domain");
+    TEST_ASSERT(parsedPayload["port"] == 3000, "Payload JSON contains port");
+    TEST_ASSERT(parsedPayload["project_name"] == "cpp-sample", "Payload JSON contains project_name");
 }
 
 void testWorkerLifecycle() {
@@ -212,6 +217,30 @@ void testWorkerLifecycle() {
 
     bool success = worker.processSingleJob(job);
     TEST_ASSERT(success, "Worker processed job through CLONING -> BUILDING -> STARTING -> RUNNING");
+
+    // Verify emitted event in events stream has container_name
+    auto* reply = static_cast<redisReply*>(
+        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+    );
+    std::string payloadStr;
+    if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements > 0) {
+        auto* msg = reply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fields = msg->element[1];
+            if (fields->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                    if (key == "payload") payloadStr = val;
+                }
+            }
+        }
+        freeReplyObject(reply);
+    }
+    TEST_ASSERT(!payloadStr.empty(), "Worker emitted completion event payload");
+    nlohmann::json parsed = nlohmann::json::parse(payloadStr);
+    TEST_ASSERT(parsed["container_name"] == "df-111111111111", "Worker emitted container_name df-111111111111");
+    TEST_ASSERT(parsed["domain"] == "cpp-test.deployforge.app", "Worker emitted domain in payload");
 }
 
 void testJobValidationAndStartFailure() {

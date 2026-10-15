@@ -245,7 +245,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         m_redis.publishEvent(
             m_cfg.redis_events_stream, "DEPLOYMENT_COMPLETED",
             job.deployment_id, job.project_id, job.user_id,
-            "RUNNING", "running", formattedContainerId, "", durationSeconds
+            "RUNNING", "running", formattedContainerId, "", durationSeconds,
+            containerName, job.domain, job.port, job.project_name
         );
 
         Logger::step("Worker", "Deployment " + job.deployment_id + " successfully RUNNING at " + publicUrl);

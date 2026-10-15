@@ -99,7 +99,7 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
 async function checkProjectHealth(projectId, userId) {
   const result = await pool.query(
     `SELECT p.id, p.name, p.domain, p.port, p.status AS project_status,
-            d.id AS deployment_id, d.container_id, d.status AS deployment_status, d.duration_seconds
+            d.id AS deployment_id, d.container_id, d.container_name, d.status AS deployment_status, d.duration_seconds
      FROM projects p
      LEFT JOIN deployments d ON d.project_id = p.id AND UPPER(d.status) = 'RUNNING'
      WHERE p.id = $1 AND p.user_id = $2
@@ -114,7 +114,9 @@ async function checkProjectHealth(projectId, userId) {
 
   const row = result.rows[0];
   const port = row.port || 3000;
-  const probe = await probeContainerEndpoint({ host: "127.0.0.1", port });
+  const containerTarget = row.container_name || (row.deployment_id ? `df-${row.deployment_id.replace(/-/g, "").slice(0, 12)}` : null);
+  const host = getMode() === "real" ? (containerTarget || "127.0.0.1") : "127.0.0.1";
+  const probe = await probeContainerEndpoint({ host, port });
 
   return {
     project_id: row.id,
@@ -122,6 +124,7 @@ async function checkProjectHealth(projectId, userId) {
     domain: row.domain,
     port,
     container_id: row.container_id || (row.deployment_id ? `c_${row.deployment_id.replace(/-/g, "").slice(0, 12)}` : null),
+    container_name: containerTarget,
     status: row.deployment_status || row.project_status,
     probe: {
       healthy: probe.healthy,

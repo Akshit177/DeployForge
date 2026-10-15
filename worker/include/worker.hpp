@@ -17,6 +17,7 @@ public:
     void run();
     void stop();
     bool processSingleJob(const DeploymentJob& job);
+    RedisClient& getRedisClient() { return m_redis; }
 
     static bool validateJob(const DeploymentJob& job, std::string& errorReason);
 

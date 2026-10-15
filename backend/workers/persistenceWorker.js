@@ -6,6 +6,10 @@ const {
   PERSISTENCE_GROUP,
   ensurePersistenceGroup,
 } = require("../services/deploymentEvents.js");
+const {
+  registerUpstreamRoute,
+  unregisterUpstreamRoute,
+} = require("../services/proxyRouter.js");
 
 const CONSUMER_NAME = `persistence-${process.pid}`;
 let isLoopRunning = false;
@@ -36,14 +40,28 @@ async function applyEventTransaction(client, eventType, payload) {
     user_id,
     status,
     container_id,
+    container_name,
     duration_seconds,
     error_message,
+    domain,
+    port,
+    project_name,
     log,
   } = payload;
 
   const validDepId = isValidUuid(deployment_id) ? deployment_id : null;
   const validProjId = isValidUuid(project_id) ? project_id : null;
   const validUserId = isValidUuid(user_id) ? user_id : null;
+
+  let activeProjId = validProjId;
+  if (!activeProjId && validDepId) {
+    const depRow = await client.query("SELECT project_id FROM deployments WHERE id = $1", [validDepId]);
+    if (depRow.rows.length > 0 && isValidUuid(depRow.rows[0].project_id)) {
+      activeProjId = depRow.rows[0].project_id;
+    }
+  }
+
+  const depContainerName = container_name || (validDepId ? `df-${validDepId.replace(/-/g, "").slice(0, 12)}` : null);
 
   switch (eventType) {
     case "STAGE_CHANGED": {
@@ -53,10 +71,10 @@ async function applyEventTransaction(client, eventType, payload) {
           [status, validDepId]
         );
       }
-      if (validProjId && status) {
+      if (activeProjId && status) {
         await client.query(
           `UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [status, validProjId]
+          [status, activeProjId]
         );
       }
       break;
@@ -69,16 +87,35 @@ async function applyEventTransaction(client, eventType, payload) {
            SET status = 'RUNNING',
                duration_seconds = COALESCE($1, duration_seconds),
                container_id = COALESCE($2, container_id),
+               container_name = COALESCE($3, container_name),
                updated_at = NOW()
-           WHERE id = $3`,
-          [duration_seconds || 0, container_id || null, validDepId]
+           WHERE id = $4`,
+          [duration_seconds || 0, container_id || null, depContainerName, validDepId]
         );
       }
-      if (validProjId) {
-        await client.query(
-          `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
-          [validProjId]
+      if (activeProjId) {
+        const projRes = await client.query(
+          `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1
+           RETURNING id, name, domain, port`,
+          [activeProjId]
         );
+        const proj = projRes.rows[0];
+        const routeDomain = domain || (proj && proj.domain);
+        if (routeDomain) {
+          const routePort = port || (proj && proj.port) || 3000;
+          const routeProjName = project_name || (proj && proj.name) || "app";
+          const targetHost = depContainerName || "127.0.0.1";
+          registerUpstreamRoute(routeDomain, {
+            projectId: activeProjId,
+            projectName: routeProjName,
+            deploymentId: validDepId,
+            containerId: container_id || (validDepId ? `c_${validDepId.replace(/-/g, "").slice(0, 12)}` : null),
+            containerName: depContainerName,
+            targetHost: targetHost,
+            port: routePort,
+            status: "Healthy",
+          });
+        }
       }
       break;
     }
@@ -94,11 +131,15 @@ async function applyEventTransaction(client, eventType, payload) {
           [error_message || "Deployment failed", validDepId]
         );
       }
-      if (validProjId) {
-        await client.query(
-          `UPDATE projects SET status = 'Failed', updated_at = NOW() WHERE id = $1`,
-          [validProjId]
+      if (activeProjId) {
+        const projRes = await client.query(
+          `UPDATE projects SET status = 'Failed', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          [activeProjId]
         );
+        const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);
+        if (unregDomain) {
+          unregisterUpstreamRoute(unregDomain);
+        }
       }
       break;
     }
@@ -114,11 +155,15 @@ async function applyEventTransaction(client, eventType, payload) {
           [validDepId]
         );
       }
-      if (validProjId) {
-        await client.query(
-          `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
-          [validProjId]
+      if (activeProjId) {
+        const projRes = await client.query(
+          `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          [activeProjId]
         );
+        const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);
+        if (unregDomain) {
+          unregisterUpstreamRoute(unregDomain);
+        }
       }
       break;
     }

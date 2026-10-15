@@ -61,7 +61,11 @@ public:
         const std::string& stage = "",
         const std::string& containerId = "",
         const std::string& errorMessage = "",
-        int durationSeconds = 0
+        int durationSeconds = 0,
+        const std::string& containerName = "",
+        const std::string& domain = "",
+        int port = 0,
+        const std::string& projectName = ""
     );
 
     bool acknowledgeJob(

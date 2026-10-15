@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS deployments (
     url VARCHAR(255),
     duration_seconds INTEGER DEFAULT 0 NOT NULL,
     container_id VARCHAR(128),
+    container_name VARCHAR(128),
     error_message TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL

@@ -238,7 +238,11 @@ bool RedisClient::publishEvent(
     const std::string& stage,
     const std::string& containerId,
     const std::string& errorMessage,
-    int durationSeconds
+    int durationSeconds,
+    const std::string& containerName,
+    const std::string& domain,
+    int port,
+    const std::string& projectName
 ) {
     reconnectIfBroken();
     if (!isConnected()) return false;
@@ -253,6 +257,18 @@ bool RedisClient::publishEvent(
     payload["stage"] = stage;
     if (!containerId.empty()) {
         payload["container_id"] = containerId;
+    }
+    if (!containerName.empty()) {
+        payload["container_name"] = containerName;
+    }
+    if (!domain.empty()) {
+        payload["domain"] = domain;
+    }
+    if (port > 0) {
+        payload["port"] = port;
+    }
+    if (!projectName.empty()) {
+        payload["project_name"] = projectName;
     }
     if (!errorMessage.empty()) {
         payload["error_message"] = errorMessage;

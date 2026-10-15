@@ -349,8 +349,11 @@ async function processJob(jobData, messageId) {
       user_id,
       status: "RUNNING",
       container_id: containerId,
+      container_name: containerName,
       duration_seconds: durationSec,
       domain,
+      port: internalPort,
+      project_name: projectName,
     });
 
     await pool.query(
@@ -358,9 +361,10 @@ async function processJob(jobData, messageId) {
        SET status = 'RUNNING',
            duration_seconds = $1,
            container_id = $2,
+           container_name = $3,
            updated_at = NOW()
-       WHERE id = $3`,
-      [durationSec, containerId, deployment_id]
+       WHERE id = $4`,
+      [durationSec, containerId, containerName, deployment_id]
     );
     await pool.query(
       `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
@@ -373,6 +377,7 @@ async function processJob(jobData, messageId) {
       projectName,
       deploymentId: deployment_id,
       containerId,
+      containerName,
       targetHost: getMode() === "real" ? containerName : "127.0.0.1",
       port: internalPort,
       status: "Healthy",

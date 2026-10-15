@@ -326,3 +326,38 @@
   - 23 new test assertions in `worker/tests/test_runner.cpp` covering image name validation, chunked decoding, HTTP status parsing (200, 204, 400, 500), job field injection rejection, and startContainer failure handling (61/61 total).
 - **Verification result:** VERIFIED — 61/61 C++ tests passing, 20/20 backend test suites passing, frontend Vite build clean.
 - **Anything deferred:** None.
+
+### F-05: Register upstream routes on deployment events and use container name for upstreams
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added `container_name VARCHAR(128)` column to `deployments` table in `backend/database/schema.sql` and `backend/database/migrate.js`.
+  - Updated C++ worker (`worker/include/redis_client.hpp`, `worker/src/redis_client.cpp`, `worker/src/worker.cpp`) to include `container_name`, `domain`, `port`, and `project_name` in the payload JSON when publishing `DEPLOYMENT_COMPLETED`.
+  - Updated `backend/workers/persistenceWorker.js` to store `container_name` in PostgreSQL on `DEPLOYMENT_COMPLETED`, and automatically call `registerUpstreamRoute` with `targetHost: containerName`.
+  - Handled `DEPLOYMENT_FAILED` and `DEPLOYMENT_CANCELLED` in `backend/workers/persistenceWorker.js` by calling `unregisterUpstreamRoute` to tear down Nginx routing when deployments stop or fail.
+  - Updated `backend/services/proxyRouter.js:syncFromDatabase()` to select `d.container_name` and set `targetHost` to `row.container_name || ('df-' + row.deployment_id.replace(/-/g, '').slice(0, 12))`, replacing hardcoded `127.0.0.1`.
+  - Updated `backend/services/healthCheck.js:checkProjectHealth()` to probe `container_name` via Docker DNS when running in real Docker mode and return `container_name`.
+  - Updated `backend/workers/deploymentWorker.js` to store `container_name` in PostgreSQL and carry it in emitted events.
+  - Added dedicated test suite `backend/tests/f05_route_registration.test.js` covering route registration with container name on completion, Nginx config generation with container upstreams, route unregistration on failure/cancellation, `syncFromDatabase` container name restoration, and health check inspection.
+  - Appended `tests/f05_route_registration.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `backend/database/schema.sql`
+  - `backend/database/migrate.js`
+  - `backend/workers/persistenceWorker.js`
+  - `backend/services/proxyRouter.js`
+  - `backend/services/healthCheck.js`
+  - `backend/workers/deploymentWorker.js`
+  - `backend/package.json`
+  - `backend/tests/f05_route_registration.test.js`
+  - `worker/include/redis_client.hpp`
+  - `worker/include/worker.hpp`
+  - `worker/src/redis_client.cpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/f05_route_registration.test.js`: 4 tests (route registration on DEPLOYMENT_COMPLETED, syncFromDatabase using container_name, checkProjectHealth returning container_name, and route removal on DEPLOYMENT_CANCELLED).
+  - `worker/tests/test_runner.cpp`: Updated `testRedisClient` and `testWorkerLifecycle` with assertions verifying `container_name`, `domain`, `port`, and `project_name` in emitted event payload (68/68 C++ tests passing).
+- **Verification result:** VERIFIED — 68/68 C++ tests passing, 21/21 backend test suites passing (100%), frontend Vite build clean.
+- **Anything deferred:** None.
+

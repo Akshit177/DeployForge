@@ -13,6 +13,7 @@ async function runMigrations() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS github_connected BOOLEAN DEFAULT false;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB DEFAULT '{"notify_failures": true, "notify_weekly": false}'::jsonb;
       ALTER TABLE deployments ALTER COLUMN status SET DEFAULT 'INITIATED';
+      ALTER TABLE deployments ADD COLUMN IF NOT EXISTS container_name VARCHAR(128);
       ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
       DO $$
