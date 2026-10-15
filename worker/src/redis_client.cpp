@@ -3,6 +3,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <nlohmann/json.hpp>
 
 namespace deployforge {
 
@@ -236,32 +237,38 @@ bool RedisClient::publishEvent(
     const std::string& status,
     const std::string& stage,
     const std::string& containerId,
-    const std::string& errorMessage
+    const std::string& errorMessage,
+    int durationSeconds
 ) {
     reconnectIfBroken();
     if (!isConnected()) return false;
 
     std::string nowIso = currentTimestampIso();
+
+    nlohmann::json payload;
+    payload["deployment_id"] = deploymentId;
+    payload["project_id"] = projectId;
+    payload["user_id"] = userId;
+    payload["status"] = status;
+    payload["stage"] = stage;
+    if (!containerId.empty()) {
+        payload["container_id"] = containerId;
+    }
+    if (!errorMessage.empty()) {
+        payload["error_message"] = errorMessage;
+    }
+    payload["duration_seconds"] = durationSeconds;
+    payload["timestamp"] = nowIso;
+
+    std::string payloadStr = payload.dump();
+
     std::vector<const char*> argv = {
         "XADD", eventsStream.c_str(), "*",
         "event_type", eventType.c_str(),
-        "deployment_id", deploymentId.c_str(),
-        "project_id", projectId.c_str(),
-        "user_id", userId.c_str(),
-        "status", status.c_str(),
-        "stage", stage.c_str()
+        "aggregate_id", deploymentId.c_str(),
+        "payload", payloadStr.c_str(),
+        "created_at", nowIso.c_str()
     };
-
-    if (!containerId.empty()) {
-        argv.push_back("container_id");
-        argv.push_back(containerId.c_str());
-    }
-    if (!errorMessage.empty()) {
-        argv.push_back("error_message");
-        argv.push_back(errorMessage.c_str());
-    }
-    argv.push_back("timestamp");
-    argv.push_back(nowIso.c_str());
 
     auto* reply = static_cast<redisReply*>(
         redisCommandArgv(m_ctx, static_cast<int>(argv.size()), argv.data(), nullptr)

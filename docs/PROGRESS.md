@@ -277,3 +277,31 @@
   - `backend/tests/phase_c_integration.test.js`: updated upstream block and proxy_pass assertions to match `upstream_df_${expectedShortId}_3000`.
 - **Verification result:** VERIFIED — Migrations applied cleanly; all 19 backend test files passed (100%); 28 C++ worker tests passed; frontend build succeeded; git working tree clean of test runtime debris.
 - **Anything deferred:** None.
+
+### F-01: Align C++ worker deployment event envelope with persistence consumer
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - C++ `publishEvent` now wraps deployment payload into a JSON object (`nlohmann::json`) and emits canonical envelope fields (`event_type`, `aggregate_id`, `payload`, `created_at`).
+  - Added `duration_seconds` measurement to `WorkerDaemon::processSingleJob` on completion/failure and passed `durationSeconds` to `publishEvent`.
+  - Hardened `backend/workers/persistenceWorker.js` to validate `payload`, route malformed/poison messages to `stream:deployment_events:dlq`, and XACK to prevent PEL poisoning.
+  - Added UUID format validation in `applyEventTransaction` to prevent syntax errors in PostgreSQL from invalid/synthetic IDs.
+  - Exported `EVENTS_DLQ_STREAM` from `backend/services/deploymentEvents.js` and `backend/workers/persistenceWorker.js`.
+  - Added dedicated test suite `backend/tests/event_envelope.test.js` validating dead-lettering of flat legacy events, parsing of envelope events, and `DEPLOYMENT_COMPLETED` persistence with duration and container ID.
+  - Updated `worker/tests/test_runner.cpp` to verify envelope fields and inner payload JSON attributes, and isolated test worker runs to dedicated test streams.
+  - Appended `tests/event_envelope.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `backend/services/deploymentEvents.js`
+  - `backend/workers/persistenceWorker.js`
+  - `backend/package.json`
+  - `backend/tests/event_envelope.test.js`
+  - `worker/include/redis_client.hpp`
+  - `worker/src/redis_client.cpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/event_envelope.test.js`: 3 tests (graceful rejection and DLQ routing of flat payloadless events with XACK; parsing and DB commit of canonical envelope; and handling of DEPLOYMENT_COMPLETED with duration_seconds and container_id).
+  - `worker/tests/test_runner.cpp`: Updated `testRedisClient` with 10 new assertions verifying envelope fields and inner JSON payload keys, and configured `testWorkerLifecycle` with dedicated test streams (38/38 C++ tests passing).
+- **Verification result:** VERIFIED — 38/38 C++ tests passing, 20/20 backend test suites passing, frontend Vite build clean.
+- **Anything deferred:** None.

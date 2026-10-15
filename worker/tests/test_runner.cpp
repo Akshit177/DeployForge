@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cassert>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 
 using namespace deployforge;
 
@@ -107,9 +108,45 @@ void testRedisClient() {
 
     bool evOk = redis.publishEvent(
         "stream:test_cpp_events", "DEPLOYMENT_COMPLETED",
-        testDepId, "proj-123", "usr-123", "RUNNING", "running", "c_test_cid_123"
+        testDepId, "proj-123", "usr-123", "RUNNING", "running", "c_test_cid_123", "", 15
     );
     TEST_ASSERT(evOk, "Deployment event published to stream via XADD");
+
+    // Verify envelope and payload contract
+    auto* reply = static_cast<redisReply*>(
+        redisCommand(redis.getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+    );
+    std::string eventType, aggregateId, payloadStr, createdAt;
+    if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements > 0) {
+        auto* msg = reply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fields = msg->element[1];
+            if (fields->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                    if (key == "event_type") eventType = val;
+                    else if (key == "aggregate_id") aggregateId = val;
+                    else if (key == "payload") payloadStr = val;
+                    else if (key == "created_at") createdAt = val;
+                }
+            }
+        }
+        freeReplyObject(reply);
+    }
+
+    TEST_ASSERT(eventType == "DEPLOYMENT_COMPLETED", "Event envelope has event_type DEPLOYMENT_COMPLETED");
+    TEST_ASSERT(aggregateId == testDepId, "Event envelope has aggregate_id matching deployment ID");
+    TEST_ASSERT(!createdAt.empty(), "Event envelope has created_at timestamp");
+    TEST_ASSERT(!payloadStr.empty(), "Event envelope contains payload JSON string");
+
+    nlohmann::json parsedPayload = nlohmann::json::parse(payloadStr);
+    TEST_ASSERT(parsedPayload["deployment_id"] == testDepId, "Payload JSON contains matching deployment_id");
+    TEST_ASSERT(parsedPayload["project_id"] == "proj-123", "Payload JSON contains matching project_id");
+    TEST_ASSERT(parsedPayload["user_id"] == "usr-123", "Payload JSON contains matching user_id");
+    TEST_ASSERT(parsedPayload["status"] == "RUNNING", "Payload JSON contains status RUNNING");
+    TEST_ASSERT(parsedPayload["container_id"] == "c_test_cid_123", "Payload JSON contains container_id");
+    TEST_ASSERT(parsedPayload["duration_seconds"] == 15, "Payload JSON contains duration_seconds");
 }
 
 void testWorkerLifecycle() {
@@ -117,6 +154,9 @@ void testWorkerLifecycle() {
     Config cfg;
     cfg.docker_mode = "simulator";
     cfg.workspace_base_path = "/tmp/df_test_workspaces";
+    cfg.redis_stream = "stream:test_cpp_deployments";
+    cfg.redis_events_stream = "stream:test_cpp_events";
+    cfg.redis_group = "cpp_workers";
 
     WorkerDaemon worker(cfg);
     if (!worker.init()) {
@@ -126,9 +166,9 @@ void testWorkerLifecycle() {
 
     DeploymentJob job;
     job.message_id = "test-msg-001";
-    job.deployment_id = "cpp-dep-lifecycle-001";
-    job.project_id = "cpp-proj-001";
-    job.user_id = "cpp-user-001";
+    job.deployment_id = "11111111-1111-1111-1111-111111111111";
+    job.project_id = "22222222-2222-2222-2222-222222222222";
+    job.user_id = "33333333-3333-3333-3333-333333333333";
     job.repo_url = "https://github.com/deployforge/sample-node";
     job.branch = "main";
     job.commit_hash = "abcdef123456";

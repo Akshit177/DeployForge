@@ -2,6 +2,7 @@ const pool = require("../config/db.js");
 const redis = require("../config/redis.js");
 const {
   EVENTS_STREAM,
+  EVENTS_DLQ_STREAM,
   PERSISTENCE_GROUP,
   ensurePersistenceGroup,
 } = require("../services/deploymentEvents.js");
@@ -18,6 +19,9 @@ function parseStreamEntry(fieldsArray) {
   }
   return result;
 }
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidUuid = (val) => typeof val === "string" && UUID_REGEX.test(val);
 
 /**
  * Apply event state change inside an atomic PostgreSQL transaction
@@ -37,25 +41,29 @@ async function applyEventTransaction(client, eventType, payload) {
     log,
   } = payload;
 
+  const validDepId = isValidUuid(deployment_id) ? deployment_id : null;
+  const validProjId = isValidUuid(project_id) ? project_id : null;
+  const validUserId = isValidUuid(user_id) ? user_id : null;
+
   switch (eventType) {
     case "STAGE_CHANGED": {
-      if (deployment_id && status) {
+      if (validDepId && status) {
         await client.query(
           `UPDATE deployments SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [status, deployment_id]
+          [status, validDepId]
         );
       }
-      if (project_id && status) {
+      if (validProjId && status) {
         await client.query(
           `UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [status, project_id]
+          [status, validProjId]
         );
       }
       break;
     }
 
     case "DEPLOYMENT_COMPLETED": {
-      if (deployment_id) {
+      if (validDepId) {
         await client.query(
           `UPDATE deployments
            SET status = 'RUNNING',
@@ -63,53 +71,53 @@ async function applyEventTransaction(client, eventType, payload) {
                container_id = COALESCE($2, container_id),
                updated_at = NOW()
            WHERE id = $3`,
-          [duration_seconds || 0, container_id || null, deployment_id]
+          [duration_seconds || 0, container_id || null, validDepId]
         );
       }
-      if (project_id) {
+      if (validProjId) {
         await client.query(
           `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
-          [project_id]
+          [validProjId]
         );
       }
       break;
     }
 
     case "DEPLOYMENT_FAILED": {
-      if (deployment_id) {
+      if (validDepId) {
         await client.query(
           `UPDATE deployments
            SET status = 'FAILED',
                error_message = $1,
                updated_at = NOW()
            WHERE id = $2`,
-          [error_message || "Deployment failed", deployment_id]
+          [error_message || "Deployment failed", validDepId]
         );
       }
-      if (project_id) {
+      if (validProjId) {
         await client.query(
           `UPDATE projects SET status = 'Failed', updated_at = NOW() WHERE id = $1`,
-          [project_id]
+          [validProjId]
         );
       }
       break;
     }
 
     case "DEPLOYMENT_CANCELLED": {
-      if (deployment_id) {
+      if (validDepId) {
         await client.query(
           `UPDATE deployments
            SET status = 'Cancelled',
                error_message = 'Deployment cancelled by user.',
                updated_at = NOW()
            WHERE id = $1`,
-          [deployment_id]
+          [validDepId]
         );
       }
-      if (project_id) {
+      if (validProjId) {
         await client.query(
           `UPDATE projects SET status = 'Stopped', updated_at = NOW() WHERE id = $1`,
-          [project_id]
+          [validProjId]
         );
       }
       break;
@@ -121,14 +129,14 @@ async function applyEventTransaction(client, eventType, payload) {
   }
 
   // Insert log row if attached to event
-  if (log && deployment_id && project_id && user_id) {
+  if (log && validDepId && validProjId && validUserId) {
     await client.query(
       `INSERT INTO logs (deployment_id, project_id, user_id, level, source, message)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
-        deployment_id,
-        project_id,
-        user_id,
+        validDepId,
+        validProjId,
+        validUserId,
         log.level || "INFO",
         log.source || "worker",
         log.message || log.text || "",
@@ -138,15 +146,60 @@ async function applyEventTransaction(client, eventType, payload) {
 }
 
 /**
+ * Route invalid or poisoned event to DLQ stream and log reason
+ */
+async function routeToDlq(messageId, eventType, rawEntry, reason) {
+  try {
+    if (redis.status !== "ready" && redis.status !== "connecting") {
+      await redis.connect().catch(() => {});
+    }
+    await redis.xadd(
+      EVENTS_DLQ_STREAM,
+      "*",
+      "original_message_id",
+      String(messageId || ""),
+      "event_type",
+      String(eventType || ""),
+      "reason",
+      String(reason || "Missing or invalid payload"),
+      "raw_entry",
+      typeof rawEntry === "string" ? rawEntry : JSON.stringify(rawEntry || {}),
+      "failed_at",
+      new Date().toISOString()
+    );
+  } catch (err) {
+    console.warn(`[Persistence Worker] Failed to write event ${messageId} to DLQ:`, err.message);
+  }
+}
+
+/**
  * Process a single event message with guaranteed atomic persistence:
  * Read Redis event → PostgreSQL update in transaction → COMMIT → ACK Redis event
  */
-async function processEvent(messageId, eventType, rawPayload) {
+async function processEvent(messageId, eventType, rawPayload, fullEntry = null) {
+  if (!rawPayload) {
+    console.warn(
+      `[Persistence Worker] Malformed event ${messageId} (${eventType}): missing 'payload' envelope field. Routing to DLQ.`
+    );
+    await routeToDlq(messageId, eventType, fullEntry, "Missing 'payload' field");
+    await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId).catch(() => {});
+    return false;
+  }
+
   let payload;
   try {
     payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+    if (!payload || typeof payload !== "object") {
+      throw new Error("Payload must be a non-null object");
+    }
   } catch (parseErr) {
     console.error(`Invalid JSON payload for event ${messageId}:`, parseErr.message);
+    await routeToDlq(
+      messageId,
+      eventType,
+      fullEntry || rawPayload,
+      `Invalid JSON payload: ${parseErr.message}`
+    );
     // Bad message format - acknowledge to avoid blocking queue
     await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId).catch(() => {});
     return false;
@@ -204,7 +257,7 @@ async function pollPersistenceEvents(count = 10) {
       if (messages && messages.length > 0) {
         for (const [messageId, fieldsArray] of messages) {
           const entry = parseStreamEntry(fieldsArray);
-          const success = await processEvent(messageId, entry.event_type, entry.payload);
+          const success = await processEvent(messageId, entry.event_type, entry.payload, entry);
           if (success) processedTotal++;
         }
       }
@@ -293,6 +346,8 @@ if (require.main === module) {
 
 module.exports = {
   CONSUMER_NAME,
+  EVENTS_DLQ_STREAM,
+  routeToDlq,
   processEvent,
   pollPersistenceEvents,
   drainPersistenceEvents,

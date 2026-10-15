@@ -60,7 +60,8 @@ public:
         const std::string& status,
         const std::string& stage = "",
         const std::string& containerId = "",
-        const std::string& errorMessage = ""
+        const std::string& errorMessage = "",
+        int durationSeconds = 0
     );
 
     bool acknowledgeJob(
@@ -68,6 +69,8 @@ public:
         const std::string& group,
         const std::string& messageId
     );
+
+    redisContext* getContext() const { return m_ctx; }
 
 private:
     std::string m_host;

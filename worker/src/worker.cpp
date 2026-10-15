@@ -89,6 +89,7 @@ void WorkerDaemon::prepareDockerfile(const std::string& workspacePath) {
 bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
     Logger::step("Worker", "Processing deployment " + job.deployment_id + " for project " + job.project_name);
     std::string workspacePath;
+    auto startTime = std::chrono::steady_clock::now();
 
     try {
         // 1. Stage: CLONING (20%)
@@ -169,6 +170,9 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
 
         std::string publicUrl = "https://" + (job.domain.empty() ? containerName : job.domain);
 
+        auto endTime = std::chrono::steady_clock::now();
+        int durationSeconds = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count());
+
         m_redis.setHotState(
             job.deployment_id, job.project_id, "RUNNING", "running", 100,
             formattedContainerId, job.port, job.domain, publicUrl
@@ -177,7 +181,7 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         m_redis.publishEvent(
             m_cfg.redis_events_stream, "DEPLOYMENT_COMPLETED",
             job.deployment_id, job.project_id, job.user_id,
-            "RUNNING", "running", formattedContainerId
+            "RUNNING", "running", formattedContainerId, "", durationSeconds
         );
 
         Logger::step("Worker", "Deployment " + job.deployment_id + " successfully RUNNING at " + publicUrl);
@@ -186,6 +190,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         return true;
 
     } catch (const std::exception& e) {
+        auto endTime = std::chrono::steady_clock::now();
+        int durationSeconds = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count());
         Logger::error("Worker", "Deployment " + job.deployment_id + " failed: " + e.what());
 
         m_redis.setHotState(
@@ -196,7 +202,7 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         m_redis.publishEvent(
             m_cfg.redis_events_stream, "DEPLOYMENT_FAILED",
             job.deployment_id, job.project_id, job.user_id,
-            "FAILED", "failed", "", e.what()
+            "FAILED", "failed", "", e.what(), durationSeconds
         );
 
         m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);

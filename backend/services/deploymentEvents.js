@@ -1,6 +1,7 @@
 const redis = require("../config/redis.js");
 
 const EVENTS_STREAM = "stream:deployment_events";
+const EVENTS_DLQ_STREAM = "stream:deployment_events:dlq";
 const PERSISTENCE_GROUP = "deployforge_persistence";
 
 let isGroupCreated = false;
@@ -82,6 +83,7 @@ async function getEventsMetrics() {
 
 module.exports = {
   EVENTS_STREAM,
+  EVENTS_DLQ_STREAM,
   PERSISTENCE_GROUP,
   ensurePersistenceGroup,
   publishDeploymentEvent,
