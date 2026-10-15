@@ -1,4 +1,5 @@
 #include "../include/docker_client.hpp"
+#include "../include/process_runner.hpp"
 #include "../include/logger.hpp"
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -9,6 +10,8 @@
 #include <chrono>
 #include <random>
 #include <filesystem>
+#include <regex>
+#include <algorithm>
 
 namespace deployforge {
 
@@ -29,6 +32,89 @@ std::string DockerClient::resolveSocketPath(const std::string& preferred) {
         }
     }
     return preferred;
+}
+
+bool DockerClient::isValidImageName(const std::string& name) {
+    if (name.empty()) return false;
+    static const std::regex s_imgPattern("^[a-z0-9][a-z0-9_.-]{0,127}(:[A-Za-z0-9_.-]{1,128})?$");
+    return std::regex_match(name, s_imgPattern);
+}
+
+static std::string decodeChunked(const std::string& in) {
+    std::string out;
+    size_t pos = 0;
+    while (pos < in.size()) {
+        auto lineEnd = in.find("\r\n", pos);
+        if (lineEnd == std::string::npos) break;
+        std::string sizeLine = in.substr(pos, lineEnd - pos);
+        auto semi = sizeLine.find(';');
+        if (semi != std::string::npos) {
+            sizeLine = sizeLine.substr(0, semi);
+        }
+        while (!sizeLine.empty() && (sizeLine.back() == ' ' || sizeLine.back() == '\t')) sizeLine.pop_back();
+        if (sizeLine.empty()) {
+            pos = lineEnd + 2;
+            continue;
+        }
+        size_t chunkSize = 0;
+        try {
+            chunkSize = std::stoul(sizeLine, nullptr, 16);
+        } catch (...) {
+            break;
+        }
+        if (chunkSize == 0) {
+            break; // Terminal chunk
+        }
+        size_t dataStart = lineEnd + 2;
+        if (dataStart + chunkSize > in.size()) {
+            out.append(in.substr(dataStart));
+            break;
+        }
+        out.append(in.substr(dataStart, chunkSize));
+        pos = dataStart + chunkSize + 2; // skip data + \r\n
+    }
+    return out;
+}
+
+std::pair<int, std::string> DockerClient::parseHttpResponse(const std::string& rawResponse) {
+    if (rawResponse.empty()) {
+        throw std::runtime_error("Empty HTTP response from Docker socket");
+    }
+
+    int statusCode = 0;
+    auto statusLineEnd = rawResponse.find("\r\n");
+    if (statusLineEnd != std::string::npos) {
+        std::string statusLine = rawResponse.substr(0, statusLineEnd);
+        auto firstSpace = statusLine.find(' ');
+        if (firstSpace != std::string::npos && firstSpace + 4 <= statusLine.size()) {
+            try {
+                statusCode = std::stoi(statusLine.substr(firstSpace + 1, 3));
+            } catch (...) {
+                statusCode = 0;
+            }
+        }
+    }
+
+    std::string headers;
+    std::string body;
+    auto headerEnd = rawResponse.find("\r\n\r\n");
+    if (headerEnd != std::string::npos) {
+        headers = rawResponse.substr(0, headerEnd);
+        body = rawResponse.substr(headerEnd + 4);
+    } else {
+        headers = rawResponse;
+    }
+
+    // Check for chunked transfer-encoding (case-insensitive)
+    std::string lowerHeaders = headers;
+    std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(), ::tolower);
+    if (lowerHeaders.find("transfer-encoding: chunked") != std::string::npos ||
+        lowerHeaders.find("transfer-encoding:\tchunked") != std::string::npos ||
+        (lowerHeaders.find("transfer-encoding:") != std::string::npos && lowerHeaders.find("chunked") != std::string::npos)) {
+        body = decodeChunked(body);
+    }
+
+    return {statusCode, body};
 }
 
 std::string DockerClient::sendHttpRequest(const std::string& method, const std::string& path, const std::string& body) {
@@ -77,12 +163,11 @@ std::string DockerClient::sendHttpRequest(const std::string& method, const std::
     }
     close(sock);
 
-    // Extract HTTP response body
-    auto headerEnd = response.find("\r\n\r\n");
-    if (headerEnd != std::string::npos) {
-        return response.substr(headerEnd + 4);
+    auto [statusCode, parsedBody] = parseHttpResponse(response);
+    if (statusCode < 200 || statusCode >= 300) {
+        throw std::runtime_error("Docker API error (" + std::to_string(statusCode) + "): " + parsedBody);
     }
-    return response;
+    return parsedBody;
 }
 
 bool DockerClient::ping() {
@@ -98,6 +183,10 @@ bool DockerClient::ping() {
 }
 
 std::string DockerClient::buildImage(const std::string& contextDir, const std::string& imageName) {
+    if (!isValidImageName(imageName)) {
+        throw std::invalid_argument("Invalid Docker image name: " + imageName);
+    }
+
     if (m_mode == "simulator") {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         static std::mt19937_64 rng(1337);
@@ -106,20 +195,12 @@ std::string DockerClient::buildImage(const std::string& contextDir, const std::s
         return ss.str();
     }
 
-    // In real mode, use docker build command via socket or CLI helper
-    std::string cmd = "tar -C " + contextDir + " -c . | curl -s --unix-socket " + m_socketPath +
-                      " -H 'Content-Type: application/x-tar' -X POST 'http://localhost/build?t=" + imageName + "'";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        throw std::runtime_error("Failed to execute image build over Docker socket");
+    // In real mode, use ProcessRunner to execute docker build safely without shell
+    std::vector<std::string> args = {"build", "-t", imageName, contextDir};
+    auto res = ProcessRunner::executeCommand("docker", args, "", 300);
+    if (!res.success()) {
+        throw std::runtime_error("Docker build failed (exit " + std::to_string(res.exit_code) + "): " + res.output);
     }
-
-    char buffer[256];
-    std::string output;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        output += buffer;
-    }
-    pclose(pipe);
 
     return imageName;
 }
@@ -127,6 +208,9 @@ std::string DockerClient::buildImage(const std::string& contextDir, const std::s
 std::string DockerClient::createContainer(const CreateContainerParams& params) {
     if (m_mode == "simulator") {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (params.container_name.find("fail") != std::string::npos || params.image_name.find("fail") != std::string::npos) {
+            return "fail_sim_c_12345";
+        }
         static std::mt19937_64 rng(42);
         std::stringstream ss;
         ss << "sim_c_" << std::hex << (rng() & 0xFFFFFFFFFFFFULL);
@@ -173,6 +257,10 @@ std::string DockerClient::createContainer(const CreateContainerParams& params) {
 
 bool DockerClient::startContainer(const std::string& containerId) {
     if (m_mode == "simulator") {
+        if (containerId.rfind("fail_", 0) == 0) {
+            Logger::error("DockerClient", "Simulator forced failure to start container " + containerId);
+            return false;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         return true;
     }

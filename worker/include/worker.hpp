@@ -18,6 +18,8 @@ public:
     void stop();
     bool processSingleJob(const DeploymentJob& job);
 
+    static bool validateJob(const DeploymentJob& job, std::string& errorReason);
+
 private:
     Config m_cfg;
     RedisClient m_redis;

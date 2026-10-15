@@ -305,3 +305,24 @@
   - `worker/tests/test_runner.cpp`: Updated `testRedisClient` with 10 new assertions verifying envelope fields and inner JSON payload keys, and configured `testWorkerLifecycle` with dedicated test streams (38/38 C++ tests passing).
 - **Verification result:** VERIFIED — 38/38 C++ tests passing, 20/20 backend test suites passing, frontend Vite build clean.
 - **Anything deferred:** None.
+
+### F-02: Harden C++ Docker build and start path and job validation (S-07)
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Eliminated `popen` shell pipe in `DockerClient::buildImage` and replaced with `ProcessRunner::executeCommand` running `docker build -t <image> <ctx>` directly with an argv array, preventing shell injection (S-07) and checking build exit codes.
+  - Added `isValidImageName` validation regex `^[a-z0-9][a-z0-9_.-]{0,127}(:[A-Za-z0-9_.-]{1,128})?$`.
+  - Made `DockerClient` HTTP client status-aware with status line parsing, chunked transfer decoding (`Transfer-Encoding: chunked`), and non-2xx throwing.
+  - Enforced `startContainer` return check in `WorkerDaemon::processSingleJob`, failing deployment if start fails instead of falsely reporting RUNNING.
+  - Implemented `WorkerDaemon::validateJob` (S-07) validating UUIDs, project name slug, port (1-65535), and repo/branch injection metacharacter safety, rejecting invalid jobs immediately as `FAILED` without spawning processes.
+- **Files touched:**
+  - `worker/include/docker_client.hpp`
+  - `worker/src/docker_client.cpp`
+  - `worker/include/worker.hpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - 23 new test assertions in `worker/tests/test_runner.cpp` covering image name validation, chunked decoding, HTTP status parsing (200, 204, 400, 500), job field injection rejection, and startContainer failure handling (61/61 total).
+- **Verification result:** VERIFIED — 61/61 C++ tests passing, 20/20 backend test suites passing, frontend Vite build clean.
+- **Anything deferred:** None.

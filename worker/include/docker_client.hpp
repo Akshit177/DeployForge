@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 namespace deployforge {
@@ -46,11 +47,14 @@ public:
     std::string getMode() const { return m_mode; }
     void setMode(const std::string& mode) { m_mode = mode; }
 
+    static bool isValidImageName(const std::string& name);
+    static std::pair<int, std::string> parseHttpResponse(const std::string& rawResponse);
+    std::string sendHttpRequest(const std::string& method, const std::string& path, const std::string& body = "");
+
 private:
     std::string m_socketPath;
     std::string m_mode;
 
-    std::string sendHttpRequest(const std::string& method, const std::string& path, const std::string& body = "");
     std::string resolveSocketPath(const std::string& preferred);
 };
 

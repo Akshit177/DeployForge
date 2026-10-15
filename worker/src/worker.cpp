@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <thread>
 #include <chrono>
+#include <regex>
 
 namespace deployforge {
 
@@ -86,7 +87,68 @@ void WorkerDaemon::prepareDockerfile(const std::string& workspacePath) {
     }
 }
 
+bool WorkerDaemon::validateJob(const DeploymentJob& job, std::string& errorReason) {
+    static const std::regex s_uuidRegex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+    static const std::regex s_slugRegex("^[a-z0-9][a-z0-9_-]{0,62}$");
+
+    if (!std::regex_match(job.deployment_id, s_uuidRegex)) {
+        errorReason = "Invalid deployment_id: must be a valid UUID";
+        return false;
+    }
+    if (!std::regex_match(job.project_id, s_uuidRegex)) {
+        errorReason = "Invalid project_id: must be a valid UUID";
+        return false;
+    }
+    if (!std::regex_match(job.user_id, s_uuidRegex)) {
+        errorReason = "Invalid user_id: must be a valid UUID";
+        return false;
+    }
+    if (!std::regex_match(job.project_name, s_slugRegex)) {
+        errorReason = "Invalid project_name: must be a lowercase alphanumeric slug (max 63 chars)";
+        return false;
+    }
+    if (job.port < 1 || job.port > 65535) {
+        errorReason = "Invalid port: must be between 1 and 65535";
+        return false;
+    }
+    if (job.repo_url.empty()) {
+        errorReason = "Repository URL cannot be empty";
+        return false;
+    }
+    if (job.repo_url.rfind("https://", 0) != 0 && job.repo_url.rfind("http://", 0) != 0) {
+        errorReason = "Invalid repository_url: must start with https:// or http://";
+        return false;
+    }
+    static const std::string s_dangerousChars = ";|&$`\"'<>(){}\n\r\t*?~";
+    if (job.repo_url.find_first_of(s_dangerousChars) != std::string::npos) {
+        errorReason = "Invalid repository_url: contains illegal characters";
+        return false;
+    }
+    if (job.branch.find_first_of(s_dangerousChars) != std::string::npos) {
+        errorReason = "Invalid branch: contains illegal characters";
+        return false;
+    }
+
+    return true;
+}
+
 bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
+    std::string errorReason;
+    if (!validateJob(job, errorReason)) {
+        Logger::warn("Worker", "Rejecting job for deployment " + job.deployment_id + ": " + errorReason);
+        m_redis.setHotState(
+            job.deployment_id, job.project_id, "FAILED", "failed", 0,
+            "", job.port, job.domain, "", errorReason
+        );
+        m_redis.publishEvent(
+            m_cfg.redis_events_stream, "DEPLOYMENT_FAILED",
+            job.deployment_id, job.project_id, job.user_id,
+            "FAILED", "failed", "", errorReason, 0
+        );
+        m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);
+        return false;
+    }
+
     Logger::step("Worker", "Processing deployment " + job.deployment_id + " for project " + job.project_name);
     std::string workspacePath;
     auto startTime = std::chrono::steady_clock::now();
@@ -160,7 +222,9 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         };
 
         std::string rawContainerId = m_docker.createContainer(cParams);
-        m_docker.startContainer(rawContainerId);
+        if (!m_docker.startContainer(rawContainerId)) {
+            throw std::runtime_error("Failed to start container: " + rawContainerId);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         // 4. Stage: RUNNING (100%)
