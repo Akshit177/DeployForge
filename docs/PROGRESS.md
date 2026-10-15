@@ -190,4 +190,23 @@
 - **Verification result:** VERIFIED — `git status --porcelain` shows no modified files after test runs; all test suites pass with 100% success.
 - **Anything deferred:** Phase 1 / Phase 2 scope of H-01 (.env.example cleanup and further hygiene as noted in roadmap).
 
+### T-02: Comprehensive authorization matrix tests
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented auto-enumerating authorization matrix test suite in `backend/tests/authz_matrix.test.js` covering all 33 distinct routes in the application.
+  - Automatically walks Express router layers and nested sub-routers (e.g. `/:id/env`) to guarantee no routes can be added without authorization coverage.
+  - Asserted anonymous requests across all 30 non-public routes return HTTP 401 Unauthorized (public routes `/api/auth/register`, `/api/auth/login`, and `/api/auth/logout` permit anonymous access).
+  - Asserted cross-tenant IDOR access (User B attempting to read, update, delete, or inspect User A's projects, deployments, live hot-states, vault secrets, custom domains, logs, SSE streams, and routing resolution/health) strictly returns HTTP 404 across all endpoints.
+  - Asserted legitimate owner access for User A succeeds with 2xx across all corresponding resource endpoints.
+  - Wired `node --test tests/authz_matrix.test.js` into `backend/package.json` test script.
+- **Files touched:**
+  - `backend/tests/authz_matrix.test.js`
+  - `backend/package.json`
+- **Tests added / updated:**
+  - `backend/tests/authz_matrix.test.js`: 31 tests across 5 suites (Auto-enumeration route discovery, anonymous 401 protection, cross-tenant IDOR 404 isolation, and owner 2xx operations).
+- **Verification result:** VERIFIED — All 31 matrix tests pass; all 17 backend test suites pass with 100% success.
+- **Anything deferred:** None.
+
+
 
