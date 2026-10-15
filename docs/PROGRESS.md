@@ -122,3 +122,22 @@
   - Ran C++ worker test suite: `make -C worker test` (28/28 passed).
 - **Verification result:** VERIFIED — `docker build -t deployforge-worker-test worker/` builds cleanly; C++ test suite passes.
 - **Anything deferred:** None.
+
+### F-04: Dashboard not served from Docker image
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Converted `backend/Dockerfile` into a multi-stage build: stage 1 builds the Vite frontend SPA, stage 2 copies the distribution assets to `/app/public`.
+  - Updated `backend/server.js` to serve `PUBLIC_DIR` (with fallback to `../frontend/dist`), while ensuring missing static assets with extensions return 404 instead of falling back to `index.html`.
+  - Updated `docker-compose.yml` to use repository root context for building the `api` service.
+  - Added repository-level `.dockerignore` ignoring node_modules, git history, and local credentials.
+- **Files touched:**
+  - `backend/Dockerfile`
+  - `backend/server.js`
+  - `docker-compose.yml`
+  - `.dockerignore`
+- **Tests added / updated:**
+  - Ran multi-stage Docker build: `docker build -t deployforge-api-test -f backend/Dockerfile .`.
+  - Ran containerized verification: confirmed `GET /` and `GET /projects` return `<div id="root"></div>`, and missing asset request `GET /assets/missing.js` returns HTTP 404.
+- **Verification result:** VERIFIED — Docker image builds cleanly; container serves SPA on root and deep paths; returns 404 on missing assets.
+- **Anything deferred:** None.

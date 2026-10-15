@@ -34,17 +34,30 @@ app.use("/api/logs", logRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/routing", routingRoutes);
 
-const frontendDistPath = path.join(__dirname, "../frontend/dist");
-const frontendRootPath = path.join(__dirname, "../frontend");
-const frontendStaticPath = fs.existsSync(frontendDistPath) ? frontendDistPath : frontendRootPath;
+const defaultPublicDir = path.join(__dirname, "public");
+const fallbackDistPath = path.join(__dirname, "../frontend/dist");
+const publicDir = process.env.PUBLIC_DIR || (fs.existsSync(defaultPublicDir) ? defaultPublicDir : fallbackDistPath);
 
-app.use(express.static(frontendStaticPath));
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+}
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     return next();
   }
 
-  return res.sendFile(path.join(frontendStaticPath, "index.html"));
+  // Missing static asset files must return 404 instead of falling back to index.html
+  if (path.extname(req.path)) {
+    return res.status(404).json({ message: "Asset not found" });
+  }
+
+  const indexPath = path.join(publicDir, "index.html");
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+
+  return res.status(404).send("Not Found");
 });
 
 const { startWorkerLoop } = require("./workers/deploymentWorker.js");

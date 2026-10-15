@@ -1,0 +1,10 @@
+node_modules
+*/node_modules
+.git
+.env
+.env.local
+backend/.env
+*.log
+.DS_Store
+worker/bin
+worker/*.o
