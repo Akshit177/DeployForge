@@ -97,6 +97,8 @@ public:
                 }
             }
 
+            setenv("GIT_TERMINAL_PROMPT", "0", 1);
+
             std::vector<char*> argv;
             argv.push_back(const_cast<char*>(cmd.c_str()));
             for (const auto& arg : args) {
@@ -181,6 +183,7 @@ public:
             "clone",
             "--depth", "1",
             "-b", branch.empty() ? "main" : branch,
+            "--",
             repoUrl,
             targetDir
         };

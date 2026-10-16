@@ -331,6 +331,33 @@ void testJobValidationAndStartFailure() {
     badScheme.repo_url = "file:///etc/passwd";
     TEST_ASSERT(!WorkerDaemon::validateJob(badScheme, errReason), "Non-HTTP repository_url rejected");
 
+    // S-08: Internal host SSRF rejection
+    DeploymentJob ssrfJob = validJob;
+    ssrfJob.repo_url = "http://169.254.169.254/latest/meta-data/";
+    TEST_ASSERT(!WorkerDaemon::validateJob(ssrfJob, errReason), "Internal metadata IP repository_url rejected");
+
+    DeploymentJob redisSsrfJob = validJob;
+    redisSsrfJob.repo_url = "http://redis:6379/x.git";
+    TEST_ASSERT(!WorkerDaemon::validateJob(redisSsrfJob, errReason), "Internal redis hostname repository_url rejected");
+
+    // S-08: Hostile branch names
+    DeploymentJob leadingDashBranch = validJob;
+    leadingDashBranch.branch = "--upload-pack=evil";
+    TEST_ASSERT(!WorkerDaemon::validateJob(leadingDashBranch, errReason), "Leading dash branch name rejected");
+
+    DeploymentJob traversalBranch = validJob;
+    traversalBranch.branch = "../../etc/passwd";
+    TEST_ASSERT(!WorkerDaemon::validateJob(traversalBranch, errReason), "Path traversal branch name rejected");
+
+    // S-08: Hostile commit hash
+    DeploymentJob hostileCommit = validJob;
+    hostileCommit.commit_hash = "$(id)";
+    TEST_ASSERT(!WorkerDaemon::validateJob(hostileCommit, errReason), "Hostile command injection commit_hash rejected");
+
+    DeploymentJob validCommit = validJob;
+    validCommit.commit_hash = "0123456789abcdef0123456789abcdef01234567";
+    TEST_ASSERT(WorkerDaemon::validateJob(validCommit, errReason), "Valid 40-char commit_hash accepted");
+
     // Test processSingleJob rejects hostile job immediately without spawning
     Config cfg;
     cfg.docker_mode = "simulator";

@@ -5,6 +5,7 @@ const { parsePagination } = require("../middleware/pagination.js");
 const { publishDeploymentJob } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { encrypt } = require("../services/crypto.js");
+const { isValidRepoUrl, isValidBranch } = require("../utils/validators.js");
 
 const router = express.Router();
 
@@ -186,16 +187,16 @@ router.post("/", async (req, res) => {
     });
   }
 
-  if (!normalizedRepo || !GIT_REPO_REGEX.test(normalizedRepo)) {
+  if (!isValidRepoUrl(normalizedRepo)) {
     return res.status(400).json({
       message: "Please provide a valid HTTPS repository URL from GitHub, GitLab, or Bitbucket (e.g., https://github.com/organization/repository).",
     });
   }
 
   const trimmedBranch = String(branch || "main").trim();
-  if (!BRANCH_REGEX.test(trimmedBranch) || trimmedBranch.startsWith("-")) {
+  if (!isValidBranch(trimmedBranch)) {
     return res.status(400).json({
-      message: "Invalid branch name. Must be 1-100 characters and cannot start with a hyphen.",
+      message: "Invalid branch name. Must be 1-100 characters and cannot start with '-' or contain '..'.",
     });
   }
 
@@ -463,10 +464,10 @@ router.patch("/:id", async (req, res) => {
     let newBranch = current.branch;
     if (branch !== undefined) {
       const trimmedBranch = String(branch).trim();
-      if (!BRANCH_REGEX.test(trimmedBranch) || trimmedBranch.startsWith("-")) {
+      if (!isValidBranch(trimmedBranch)) {
         await client.query("ROLLBACK");
         return res.status(400).json({
-          message: "Invalid branch name. Must be 1-100 characters and cannot start with a hyphen.",
+          message: "Invalid branch name. Must be 1-100 characters and cannot start with '-' or contain '..'.",
         });
       }
       newBranch = trimmedBranch;

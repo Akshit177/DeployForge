@@ -171,7 +171,11 @@ async function processJob(jobData, messageId) {
 
     if (isGitUrl) {
       try {
-        await execFileAsync("git", ["clone", "--depth", "1", "-b", branch || "main", repo_url, workspacePath]);
+        await execFileAsync(
+          "git",
+          ["clone", "--depth", "1", "-b", branch || "main", "--", repo_url, workspacePath],
+          { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }
+        );
       } catch (gitErr) {
         if (
           getMode() === "real" ||
@@ -188,11 +192,20 @@ async function processJob(jobData, messageId) {
         // If specific commit_hash was requested (and not HEAD)
         if (commit_hash && commit_hash !== "HEAD") {
           try {
-            await execFileAsync("git", ["checkout", commit_hash], { cwd: workspacePath });
+            await execFileAsync("git", ["checkout", commit_hash], {
+              cwd: workspacePath,
+              env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+            });
           } catch (checkoutErr) {
             try {
-              await execFileAsync("git", ["fetch", "--depth", "1", "origin", commit_hash], { cwd: workspacePath });
-              await execFileAsync("git", ["checkout", commit_hash], { cwd: workspacePath });
+              await execFileAsync("git", ["fetch", "--depth", "1", "origin", commit_hash], {
+                cwd: workspacePath,
+                env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+              });
+              await execFileAsync("git", ["checkout", commit_hash], {
+                cwd: workspacePath,
+                env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+              });
             } catch (fetchErr) {
               if (getMode() === "real" || fs.existsSync(repo_url) || repo_url.startsWith("file://")) {
                 throw new Error(`Commit hash not found: ${commit_hash}`);

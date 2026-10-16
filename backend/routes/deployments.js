@@ -9,6 +9,13 @@ const { getDeploymentHotState, setDeploymentHotState, deleteDeploymentHotState }
 const { stopContainer, removeContainer } = require("../services/dockerClient.js");
 const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
 const { canTransition, normalizeStatus } = require("../services/statusMachine.js");
+const {
+  isValidBranch,
+  isValidCommitHash,
+  sanitizeCommitMessage,
+  isValidTrigger,
+  isValidEnvironment,
+} = require("../utils/validators.js");
 
 const router = express.Router();
 
@@ -169,6 +176,38 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ message: "A valid project_id is required." });
   }
 
+  if (branch !== undefined && branch !== null && branch !== "") {
+    if (!isValidBranch(String(branch))) {
+      return res.status(400).json({
+        message: "Invalid branch name. Must be 1-100 characters and cannot start with '-' or contain '..'.",
+      });
+    }
+  }
+
+  if (commit_hash !== undefined && commit_hash !== null && commit_hash !== "") {
+    if (!isValidCommitHash(String(commit_hash))) {
+      return res.status(400).json({
+        message: "Invalid commit hash. Must be 'HEAD' or a 7-40 character hexadecimal SHA.",
+      });
+    }
+  }
+
+  if (trigger !== undefined && trigger !== null && trigger !== "") {
+    if (!isValidTrigger(String(trigger))) {
+      return res.status(400).json({
+        message: "Invalid trigger value. Must be 1-50 alphanumeric characters.",
+      });
+    }
+  }
+
+  if (environment !== undefined && environment !== null && environment !== "") {
+    if (!isValidEnvironment(String(environment))) {
+      return res.status(400).json({
+        message: "Invalid environment value. Must be 1-50 alphanumeric characters.",
+      });
+    }
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -187,7 +226,7 @@ router.post("/", async (req, res) => {
     const project = projectRes.rows[0];
     const deployBranch = branch ? String(branch).trim() : project.branch;
     const deployCommit = String(commit_hash).trim() || project.latest_commit || "HEAD";
-    const deployMessage = String(commit_message).trim() || "Deploy latest changes";
+    const deployMessage = sanitizeCommitMessage(commit_message);
     const deployEnv = String(environment).trim() || "production";
     const deployTrigger = String(trigger).trim() || "manual";
 

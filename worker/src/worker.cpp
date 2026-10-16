@@ -121,17 +121,25 @@ bool WorkerDaemon::validateJob(const DeploymentJob& job, std::string& errorReaso
         errorReason = "Repository URL cannot be empty";
         return false;
     }
-    if (job.repo_url.rfind("https://", 0) != 0 && job.repo_url.rfind("http://", 0) != 0) {
-        errorReason = "Invalid repository_url: must start with https:// or http://";
+    static const std::regex s_repoUrlPattern(R"(^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?(\/)?$)");
+    if (!std::regex_match(job.repo_url, s_repoUrlPattern)) {
+        errorReason = "Invalid repository_url: must be a valid HTTPS URL from github.com, gitlab.com, or bitbucket.org";
         return false;
     }
-    static const std::string s_dangerousChars = ";|&$`\"'<>(){}\n\r\t*?~";
-    if (job.repo_url.find_first_of(s_dangerousChars) != std::string::npos) {
-        errorReason = "Invalid repository_url: contains illegal characters";
+
+    if (job.branch.empty()) {
+        errorReason = "Branch cannot be empty";
         return false;
     }
-    if (job.branch.find_first_of(s_dangerousChars) != std::string::npos) {
-        errorReason = "Invalid branch: contains illegal characters";
+    static const std::regex s_branchPattern(R"(^[A-Za-z0-9._/-]{1,100}$)");
+    if (!std::regex_match(job.branch, s_branchPattern) || job.branch.rfind("-", 0) == 0 || job.branch.find("..") != std::string::npos) {
+        errorReason = "Invalid branch: must be 1-100 alphanumeric characters, without leading '-' or '..'";
+        return false;
+    }
+
+    static const std::regex s_commitPattern(R"(^[0-9a-fA-F]{7,40}$)");
+    if (!job.commit_hash.empty() && job.commit_hash != "HEAD" && !std::regex_match(job.commit_hash, s_commitPattern)) {
+        errorReason = "Invalid commit_hash: must be 'HEAD' or a 7-40 hex SHA";
         return false;
     }
 

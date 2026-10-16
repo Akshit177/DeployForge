@@ -508,3 +508,41 @@
   - `worker/tests/test_runner.cpp`: Added Suite 7 covering worker internal env fetch over TCP with token header and JSON decoding (94/94 C++ tests passing).
 - **Verification result:** VERIFIED — 94/94 C++ worker tests pass, 25/25 backend test suites pass (100%), frontend Vite build clean.
 - **Anything deferred:** None.
+
+### S-08: Prevent repository URL SSRF and validate branch and commit fields
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented centralized validators in `backend/utils/validators.js`:
+    - `isValidRepoUrl(url)`: Enforces HTTPS allowlist (`github.com`, `gitlab.com`, `bitbucket.org`). Strictly rejects internal IP metadata (`169.254.169.254`), internal service hostnames (`redis`, `localhost`), and unencrypted/insecure protocols.
+    - `isValidBranch(branch)`: Validates format `^[A-Za-z0-9._/-]{1,100}$`, strictly rejects leading hyphens (`-`) to block command flag injection (e.g. `--upload-pack=...`), and rejects path traversal (`..`).
+    - `isValidCommitHash(hash)`: Strictly validates `HEAD` or 7-40 character hexadecimal SHA `^[0-9a-fA-F]{7,40}$`, blocking shell injection patterns (e.g. `$(id)`).
+    - `sanitizeCommitMessage(msg)`: Strips ASCII control characters and caps message length to 500 characters.
+    - `isValidTrigger(trigger)` and `isValidEnvironment(env)`: Validates alphanumeric identifier strings up to 50 characters.
+  - Hardened API Endpoints:
+    - `backend/routes/projects.js`: `POST /api/projects` and `PATCH /api/projects/:id` validate repository URL against allowlist and validate branch names, returning 400 Bad Request on failure.
+    - `backend/routes/deployments.js`: `POST /api/deployments` validates `branch`, `commit_hash`, `trigger`, and `environment`, and sanitizes `commit_message`, returning 400 Bad Request on invalid inputs.
+  - Worker Git Hardening:
+    - Node Worker (`backend/workers/deploymentWorker.js`): Uses positional delimiter `--` before `repo_url` and `workspacePath` in `git clone`, and passes `GIT_TERMINAL_PROMPT: "0"` in child process environment to prevent credential prompt hanging.
+    - C++ Worker (`worker/include/process_runner.hpp`): Added `--` positional delimiter in `ProcessRunner::cloneRepository`, and set `GIT_TERMINAL_PROMPT=0` in child process before execution.
+    - C++ Job Validation (`worker/src/worker.cpp`): Hardened `WorkerDaemon::validateJob` to enforce HTTPS allowlist regex on `repo_url`, branch character and length rules without leading `-` or `..`, and commit hash hexadecimal format.
+  - Test suites:
+    - Created `backend/tests/s08_ssrf_validation.test.js`: 7 tests covering unit validation of repo URL allowlist / SSRF rejection, branch safety, commit hash format, project creation SSRF rejection (400), branch rejection (400), deployment input validation (400), and valid deployment creation with sanitized message.
+    - Added 6 new test assertions in Suite 6 of `worker/tests/test_runner.cpp` validating C++ worker job rejection of SSRF metadata IP, internal redis host, leading dash branch, traversal branch, and injection commit hash (100/100 C++ tests passing).
+    - Appended `tests/s08_ssrf_validation.test.js` to `backend/package.json` test script.
+- **Files touched:**
+  - `backend/utils/validators.js`
+  - `backend/routes/projects.js`
+  - `backend/routes/deployments.js`
+  - `backend/workers/deploymentWorker.js`
+  - `backend/package.json`
+  - `backend/tests/s08_ssrf_validation.test.js`
+  - `worker/include/process_runner.hpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/s08_ssrf_validation.test.js`: 7 tests covering SSRF rejection, branch rules, commit hash format, and API 400 error handling.
+  - `worker/tests/test_runner.cpp`: 6 new assertions in Suite 6 verifying worker rejection of SSRF hosts, hostile branches, and hostile commit hashes (100/100 C++ tests passing).
+- **Verification result:** VERIFIED — 100/100 C++ worker tests pass, 26/26 backend test suites pass (100%), frontend Vite build clean.
+- **Anything deferred:** None.
