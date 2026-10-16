@@ -546,3 +546,28 @@
   - `worker/tests/test_runner.cpp`: 6 new assertions in Suite 6 verifying worker rejection of SSRF hosts, hostile branches, and hostile commit hashes (100/100 C++ tests passing).
 - **Verification result:** VERIFIED — 100/100 C++ worker tests pass, 26/26 backend test suites pass (100%), frontend Vite build clean.
 - **Anything deferred:** None.
+
+### S-10: Prevent PATCH /projects/:id mass-assignment and validate update fields
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Hardened `PATCH /api/projects/:id` in `backend/routes/projects.js`:
+    - Direct status modification prevention: checks `if (req.body && req.body.status !== undefined)` and returns `400 Bad Request` with `"Cannot modify project status directly."` Status can only be written by pipeline workers.
+    - Strict allowlist of updatable fields: only `name`, `repository_url`, `branch`, `port`, `auto_deploy` (and vault variables) are accepted.
+    - Forbidden and sensitive fields (`id`, `user_id`, `created_at`, `updated_at`, `domain`, `latest_commit`, `container_id`, `container_name`) are strictly excluded from the SQL update query, preventing mass-assignment and privilege escalation.
+    - Port validation: ensures `port` is an integer between 1 and 65535 (`1 <= port <= 65535`), returning `400 Bad Request` on non-integers, out-of-range values (e.g. 99999, -1, 0), or invalid types.
+    - Repository URL validation: validates updated repository URL using `isValidRepoUrl` against the approved HTTPS allowlist (GitHub, GitLab, Bitbucket) and rejects SSRF URLs.
+    - Branch validation: validates updated branch name using `isValidBranch` (1-100 chars, no leading `-`, no `..`).
+  - Test suites:
+    - Created `backend/tests/s10_mass_assignment.test.js`: 6 integration tests verifying status modification rejection (400) and DB immutability, out-of-range port rejection (400), invalid port rejection (400), forbidden field mass-assignment ignore safety (200), SSRF / flag injection rejection on update (400), and valid configuration update and persistence (200).
+    - Added `tests/s10_mass_assignment.test.js` to `backend/package.json` test script.
+- **Files touched:**
+  - `backend/routes/projects.js`
+  - `backend/package.json`
+  - `backend/tests/s10_mass_assignment.test.js`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/s10_mass_assignment.test.js`: 6 integration tests covering status tampering protection, port boundary validation, forbidden field mass-assignment ignore, and valid update persistence.
+- **Verification result:** VERIFIED — 100/100 C++ worker tests pass, 27/27 backend test suites pass (100%), frontend Vite build clean.
+- **Anything deferred:** None.
+

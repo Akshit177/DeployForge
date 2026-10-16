@@ -401,6 +401,10 @@ router.patch("/:id", async (req, res) => {
     return res.status(400).json({ message: "Invalid project ID format." });
   }
 
+  if (req.body && req.body.status !== undefined) {
+    return res.status(400).json({ message: "Cannot modify project status directly." });
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -418,6 +422,8 @@ router.patch("/:id", async (req, res) => {
     const current = check.rows[0];
     const {
       name,
+      repository_url,
+      repoUrl,
       branch,
       runtime,
       port,
@@ -425,7 +431,6 @@ router.patch("/:id", async (req, res) => {
       autoDeploy,
       env_vars,
       envVars,
-      status,
     } = req.body;
 
     let newName = current.name;
@@ -461,6 +466,19 @@ router.patch("/:id", async (req, res) => {
       }
     }
 
+    let newRepo = current.repository_url;
+    const rawRepo = repository_url !== undefined ? repository_url : repoUrl;
+    if (rawRepo !== undefined) {
+      const normalizedRepo = normalizeRepoUrl(rawRepo);
+      if (!isValidRepoUrl(normalizedRepo)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Please provide a valid HTTPS repository URL from GitHub, GitLab, or Bitbucket (e.g., https://github.com/organization/repository).",
+        });
+      }
+      newRepo = normalizedRepo;
+    }
+
     let newBranch = current.branch;
     if (branch !== undefined) {
       const trimmedBranch = String(branch).trim();
@@ -477,10 +495,17 @@ router.patch("/:id", async (req, res) => {
     let newPort = current.port;
     if (port !== undefined) {
       const parsedPort = Number(port);
-      if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+      if (
+        port === null ||
+        typeof port === "boolean" ||
+        (typeof port === "string" && port.trim() === "") ||
+        !Number.isInteger(parsedPort) ||
+        parsedPort < 1 ||
+        parsedPort > 65535
+      ) {
         await client.query("ROLLBACK");
         return res.status(400).json({
-          message: "Internal container port must be an integer between 1024 and 65535.",
+          message: "Internal container port must be an integer between 1 and 65535.",
         });
       }
       newPort = parsedPort;
@@ -492,8 +517,6 @@ router.patch("/:id", async (req, res) => {
         ? Boolean(auto_deploy)
         : current.auto_deploy;
 
-    const newStatus = status !== undefined ? String(status).trim() : current.status;
-
     const updateResult = await client.query(
       `UPDATE projects
        SET name = $1,
@@ -502,11 +525,11 @@ router.patch("/:id", async (req, res) => {
            runtime = $4,
            port = $5,
            auto_deploy = $6,
-           status = $7,
+           repository_url = $7,
            updated_at = NOW()
        WHERE id = $8 AND user_id = $9
        RETURNING *`,
-      [newName, newDomain, newBranch, newRuntime, newPort, newAutoDeploy, newStatus, id, req.user.id]
+      [newName, newDomain, newBranch, newRuntime, newPort, newAutoDeploy, newRepo, id, req.user.id]
     );
 
     const varsSource = envVars !== undefined ? envVars : env_vars;
