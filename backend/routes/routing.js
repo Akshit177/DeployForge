@@ -1,7 +1,7 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
-const { getRoutingTable, resolveDomain, registerUpstreamRoute } = require("../services/proxyRouter.js");
+const { getRoutingTable, resolveDomain, registerUpstreamRoute, syncFromDatabase } = require("../services/proxyRouter.js");
 const { checkProjectHealth } = require("../services/healthCheck.js");
 
 const router = express.Router();
@@ -21,9 +21,16 @@ router.get("/table", async (req, res) => {
     );
     const allowedProjectIds = new Set(userProjects.rows.map((r) => r.id));
 
-    const routes = getRoutingTable().filter((r) =>
+    let routes = getRoutingTable().filter((r) =>
       allowedProjectIds.has(r.project_id)
     );
+
+    if (routes.length === 0 && allowedProjectIds.size > 0) {
+      await syncFromDatabase();
+      routes = getRoutingTable().filter((r) =>
+        allowedProjectIds.has(r.project_id)
+      );
+    }
 
     return res.status(200).json({
       active_routes_count: routes.length,
@@ -41,7 +48,11 @@ router.get("/table", async (req, res) => {
  */
 router.get("/resolve/:domain", async (req, res) => {
   const { domain } = req.params;
-  const match = resolveDomain(domain);
+  let match = resolveDomain(domain);
+  if (!match) {
+    await syncFromDatabase();
+    match = resolveDomain(domain);
+  }
 
   if (!match) {
     return res.status(404).json({

@@ -376,10 +376,16 @@ export default function ProjectsPage({ navigate }) {
             const isDeleting = deletingId === p.id;
             const isRedeploying = redeployingId === p.id;
             const stageProgress = getStageProgress(state);
-            const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+            const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".localhost") || window.location.hostname.endsWith(".nip.io"));
             const rawDomain = p.url || p.domain || `${p.name}.deployforge.app`;
-            const localDomain = `${p.name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app"}.localhost`;
-            const domainHref = isLocalHost ? `http://${localDomain}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`);
+            const safeSlug = (p.name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
+            const localDomain = `${safeSlug}.localhost`;
+            const hostPort = typeof window !== "undefined" ? window.location.port : "";
+            const envIngressPort = typeof import.meta !== "undefined" && import.meta.env?.VITE_INGRESS_PORT;
+            const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" ? hostPort : "");
+            const portSuffix = ingressPort ? `:${ingressPort}` : "";
+            const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`);
+            const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : rawDomain;
 
             return (
               <article
@@ -483,9 +489,9 @@ export default function ProjectsPage({ navigate }) {
                     rel="noreferrer"
                     onClick={(e) => e.stopPropagation()}
                     title="Open live production domain in new tab"
-                    aria-label={`Open ${rawDomain} in new tab`}
+                    aria-label={`Open ${displayDomain} in new tab`}
                   >
-                    <span className="truncate-mono">{rawDomain}</span>
+                    <span className="truncate-mono">{displayDomain}</span>
                     <ExternalLinkIcon size={12} className="ext-arrow-svg" />
                   </a>
                 </div>

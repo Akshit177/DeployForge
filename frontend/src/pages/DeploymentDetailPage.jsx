@@ -364,10 +364,16 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
   const paramProjectName = searchParams?.get("project_name") || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("project_name") : null);
   const displayNum = deployment?.display_id || (deployment?.num ? `#${deployment.num}` : "#1");
   const projectName = deployment?.projectName || deployment?.project || paramProjectName || "web-app";
-  const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+  const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".localhost") || window.location.hostname.endsWith(".nip.io"));
   const projectDomain = deployment?.url || `${projectName}.deployforge.app`;
-  const localDomain = `${projectName.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app"}.localhost`;
-  const domainHref = isLocalHost ? `http://${localDomain}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`);
+  const safeSlug = (projectName || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
+  const localDomain = `${safeSlug}.localhost`;
+  const hostPort = typeof window !== "undefined" ? window.location.port : "";
+  const envIngressPort = typeof import.meta !== "undefined" && import.meta.env?.VITE_INGRESS_PORT;
+  const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" ? hostPort : "");
+  const portSuffix = ingressPort ? `:${ingressPort}` : "";
+  const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`);
+  const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : projectDomain;
   const branchName = deployment?.branch || "main";
   const commitSha = deployment?.commit || deployment?.commit_hash?.slice(0, 7) || "HEAD";
   const containerId = deployment?.container_id || (isRunning ? `df-${deployment?.id?.slice(0, 12)}` : null);
@@ -428,7 +434,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               target="_blank"
               rel="noreferrer"
               className="btn-primary visit-btn"
-              title="Open live deployment in new tab"
+              title={`Open live deployment at ${domainHref} in new tab`}
             >
               <span>Visit</span>
               <ExternalLinkIcon size={13} />
@@ -665,8 +671,8 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               <dt>Ingress Domain</dt>
               <dd style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                  <a href={domainHref} target="_blank" rel="noreferrer" style={{ color: "var(--accent-emerald, #10b981)", textDecoration: "none", fontWeight: 500 }}>
-                    <code>{projectDomain}</code>
+                  <a href={domainHref} target="_blank" rel="noreferrer" style={{ color: "var(--accent-emerald, #10b981)", textDecoration: "none", fontWeight: 500 }} title={`Open ${displayDomain} in new tab`}>
+                    <code>{displayDomain}</code>
                   </a>
                   {domainHealth?.probe?.healthy ? (
                     <span

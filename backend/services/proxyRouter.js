@@ -61,7 +61,18 @@ function unregisterUpstreamRoute(domain) {
  */
 function resolveDomain(domain) {
   if (!domain) return null;
-  return routingTable.get(domain.toLowerCase().trim()) || null;
+  const normalized = domain.toLowerCase().trim();
+  const direct = routingTable.get(normalized);
+  if (direct) return direct;
+
+  for (const entry of routingTable.values()) {
+    const slug = (entry.project_name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+    if (normalized === `${slug}.localhost` || normalized === `${slug}.127.0.0.1.nip.io`) {
+      return entry;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -142,11 +153,21 @@ function generateNginxConfig() {
     const safeProjectIdShort = String(route.project_id || "app").replace(/[^a-z0-9]/gi, "").slice(0, 12).toLowerCase();
     const safeUpstreamName = `upstream_df_${safeProjectIdShort}_${route.port}`;
 
-    let serverNames = `    server_name ${route.domain};\n`;
-    if (includeDevDomains) {
-      serverNames += `    server_name ${safeProjectSlug}.localhost;\n`;
-      serverNames += `    server_name ${safeProjectSlug}.127.0.0.1.nip.io;\n`;
+    const domainList = [];
+    if (route.domain) {
+      domainList.push(route.domain.toLowerCase().trim());
     }
+    if (includeDevDomains) {
+      const devLocalhost = `${safeProjectSlug}.localhost`;
+      const devNipIo = `${safeProjectSlug}.127.0.0.1.nip.io`;
+      if (!domainList.includes(devLocalhost)) {
+        domainList.push(devLocalhost);
+      }
+      if (!domainList.includes(devNipIo)) {
+        domainList.push(devNipIo);
+      }
+    }
+    const serverNames = domainList.map((d) => `    server_name ${d};\n`).join("");
 
     config += `upstream ${safeUpstreamName} {
     server ${route.target_host}:${route.port} max_fails=3 fail_timeout=10s;
