@@ -571,3 +571,109 @@
 - **Verification result:** VERIFIED — 100/100 C++ worker tests pass, 27/27 backend test suites pass (100%), frontend Vite build clean.
 - **Anything deferred:** None.
 
+### F-15: Real-time log streaming over Redis pub/sub and persistence ingestion
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented SSE connection cleanup hardening in `backend/routes/logs.js`: registered `req.on("close")` listener immediately upon sending headers to prevent hung SSE streaming connections, unreferenced heartbeat `pingInterval`, and properly closed dedicated Redis subscriber `subClient`.
+  - Added real-time log publishing via Redis Pub/Sub in `backend/workers/persistenceWorker.js`: on `LOG_EMITTED`, inserted logs into PostgreSQL `logs` table and published to `logs:<deploymentId>` and `project:<projectId>`.
+  - Implemented `publishLog` in C++ Worker Redis client (`worker/include/redis_client.hpp`, `worker/src/redis_client.cpp`) emitting canonical `LOG_EMITTED` envelopes to Redis Streams.
+  - Streamed live build and execution outputs in C++ `WorkerDaemon::processSingleJob` (`worker/src/worker.cpp`) across git clone, docker build, environment fetch, and readiness probing.
+  - Added dedicated test suite `backend/tests/f15_log_streaming.test.js` validating persistence worker `LOG_EMITTED` ingestion into PostgreSQL and Redis Pub/Sub broadcast, historical chronologically-ordered log retrieval via `GET /api/logs`, and live SSE log delivery over Redis Pub/Sub.
+  - Appended `tests/f15_log_streaming.test.js` to `backend/package.json` test script.
+- **Files touched:**
+  - `backend/routes/logs.js`
+  - `backend/services/logEmitter.js`
+  - `backend/workers/persistenceWorker.js`
+  - `backend/tests/f15_log_streaming.test.js`
+  - `backend/tests/authz_matrix.test.js`
+  - `backend/tests/event_envelope.test.js`
+  - `backend/package.json`
+  - `worker/include/redis_client.hpp`
+  - `worker/src/redis_client.cpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+- **Tests added / updated:**
+  - `backend/tests/f15_log_streaming.test.js`: 3 tests (persistenceWorker ingestion & Pub/Sub broadcast, chronological retrieval via GET /api/logs, live SSE streaming delivery).
+  - `worker/tests/test_runner.cpp`: Updated Suite 4 with unit assertions verifying `publishLog` emits `LOG_EMITTED` envelope with message, level, and source.
+- **Verification result:** VERIFIED — 107/107 C++ tests pass, 28/28 backend test suites pass, frontend Vite build clean.
+- **Anything deferred:** None.
+
+### F-16: Ingress domain resolution, DEV_DOMAINS compose support, and host port links
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Added `DEV_DOMAINS: ${DEV_DOMAINS:-true}` under `api` service environment in `docker-compose.yml`, ensuring `.localhost` and `.127.0.0.1.nip.io` developer ingress aliases are enabled by default in containerized production mode.
+  - Enhanced `generateNginxConfig` in `backend/services/proxyRouter.js` to format and deduplicate `server_name` directives cleanly with `.localhost` and `.127.0.0.1.nip.io` aliases.
+  - Hardened `resolveDomain` in `backend/services/proxyRouter.js` to match `.localhost` and `.127.0.0.1.nip.io` domain requests against active routes by safe project slug.
+  - Added `syncFromDatabase()` fallback to `GET /api/routing/table` and `GET /api/routing/resolve/:domain` in `backend/routes/routing.js` when the in-memory routing table is empty (e.g. following an API container restart).
+  - Updated `frontend/src/pages/ProjectsPage.jsx` and `frontend/src/pages/DeploymentDetailPage.jsx`:
+    - Updated `isLocalHost` detection to include `.localhost` and `.nip.io` hostnames.
+    - Dynamically computed non-standard port suffix (`portSuffix = ingressPort ? ':' + ingressPort : ''`) using `VITE_INGRESS_PORT` or `window.location.port` when not standard 80/443.
+    - Formatted `domainHref` to `http://${localDomain}${portSuffix}` and displayed `displayDomain`, resolving `logiclab.localhost refused to connect` (ERR_CONNECTION_REFUSED) when running DeployForge on non-standard ports.
+- **Files touched:**
+  - `docker-compose.yml`
+  - `backend/services/proxyRouter.js`
+  - `backend/routes/routing.js`
+  - `frontend/src/pages/ProjectsPage.jsx`
+  - `frontend/src/pages/DeploymentDetailPage.jsx`
+- **Tests added / updated:**
+  - Verified routing resolution in `backend/tests/health_and_routing.test.js` and `backend/tests/nginx_manager.test.js`.
+  - Frontend built cleanly without lint or syntax errors.
+- **Verification result:** VERIFIED — `npm run build` in frontend succeeded, full backend test suite passed.
+- **Anything deferred:** None.
+
+### T-01: Golden JSON contract fixtures for job schema and event envelopes
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Defined canonical golden JSON contract fixtures in `docs/contracts/*.json`:
+    - `docs/contracts/job_contract.json`: Golden contract schema for `stream:deployments` jobs consumed by workers.
+    - `docs/contracts/event_envelope_contract.json`: Golden contract schema for `stream:deployment_events` lifecycle envelopes (`STAGE_CHANGED`, `DEPLOYMENT_COMPLETED`, etc.) consumed by persistence worker.
+    - `docs/contracts/log_envelope_contract.json`: Golden contract schema for `LOG_EMITTED` events and pub/sub distribution.
+  - Documented complete event architecture and contract specifications in `docs/events.md`.
+  - Added dedicated Node contract test suite `backend/tests/t01_contract_tests.test.js`:
+    - Validates `publishDeploymentJob` emits required fields conforming to `job_contract.json`.
+    - Validates `persistenceWorker` correctly applies golden `event_envelope_contract.json` fixture to PostgreSQL.
+    - Validates `persistenceWorker` correctly applies golden `log_envelope_contract.json` fixture to `logs` table.
+    - Validates contract violations (missing payload) are rejected and routed to DLQ.
+  - Added Suite 8 (`testGoldenContracts`) in C++ test runner `worker/tests/test_runner.cpp`:
+    - Validates `job_contract.json` deserialization into `DeploymentJob` struct and validation via `WorkerDaemon::validateJob`.
+    - Validates `event_envelope_contract.json` publishing via `RedisClient::publishEvent` and verifies required envelope and payload keys.
+    - Validates `log_envelope_contract.json` publishing via `RedisClient::publishLog` and verifies payload keys.
+  - Appended `tests/t01_contract_tests.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `docs/contracts/job_contract.json`
+  - `docs/contracts/event_envelope_contract.json`
+  - `docs/contracts/log_envelope_contract.json`
+  - `docs/events.md`
+  - `backend/tests/t01_contract_tests.test.js`
+  - `backend/package.json`
+  - `worker/tests/test_runner.cpp`
+- **Tests added / updated:**
+  - `backend/tests/t01_contract_tests.test.js`: 4 tests covering job schema emission, event envelope persistence, log envelope persistence, and DLQ contract violation routing.
+  - `worker/tests/test_runner.cpp`: Suite 8 with 34 new assertions (141/141 total tests passing).
+- **Verification result:** VERIFIED — 141/141 C++ worker tests pass, 29/29 backend test suites pass (100%), frontend Vite build clean.
+- **Anything deferred:** None.
+
+### T-04: Real-Docker golden-path smoke test & M1 acceptance verification
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Created end-to-end acceptance smoke test suite `backend/tests/t04_smoke.test.js` validating all M1 acceptance criteria from the roadmap:
+    - **Criterion 1 (Domain Allocation & Uniqueness):** Multi-tenant registration and project creation with duplicate names verified to allocate distinct, collision-free suffixed domains (`shared-smoke.deployforge.app` vs `shared-smoke-2.deployforge.app`).
+    - **Criterion 2 (Encrypted Vault Isolation):** Project vault secret persistence verified; asserted absence of plaintext secrets from PostgreSQL `projects` table and public API responses; verified decrypted secrets delivery via `/internal/deployments/:id/env`.
+    - **Criterion 3 (Branch Clone Resilience):** Bad branch (`nonexistent-branch-xyz`) clone failure verified to terminate cleanly in `FAILED` status without silent fallback to default branch.
+    - **Criterion 4 (Golden Path Execution & Ingress):** Verified deployment execution through `QUEUED -> CLONING -> BUILDING -> STARTING -> RUNNING`, `serving = true`, real-time build logs captured, and dynamic Nginx ingress routing for `.localhost` and `.deployforge.app`.
+    - **Criterion 5 (Teardown & Cleanup):** Verified `POST /deployments/:id/stop` transitions deployment to `STOPPED`, sets `serving = false`, and cleanly tears down Nginx upstreams and routing without resource leaks.
+  - Appended `tests/t04_smoke.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `backend/tests/t04_smoke.test.js`
+  - `backend/package.json`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/t04_smoke.test.js`: 5 integration tests covering all M1 acceptance criteria.
+- **Verification result:** VERIFIED — 30/30 backend test suites pass (100%), 141/141 C++ worker tests pass, frontend Vite build clean.
+- **Anything deferred:** None.
+
+

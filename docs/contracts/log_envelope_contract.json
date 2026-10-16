@@ -1,0 +1,40 @@
+{
+  "description": "Golden contract fixture for DeployForge log events published to stream:deployment_events and logs:<deploymentId>",
+  "stream": "stream:deployment_events",
+  "envelope": {
+    "event_type": "LOG_EMITTED",
+    "aggregate_id": "123e4567-e89b-12d3-a456-426614174000",
+    "created_at": "2026-10-16T12:00:15.000Z",
+    "payload": {
+      "deployment_id": "123e4567-e89b-12d3-a456-426614174000",
+      "project_id": "223e4567-e89b-12d3-a456-426614174001",
+      "user_id": "323e4567-e89b-12d3-a456-426614174002",
+      "level": "INFO",
+      "source": "build",
+      "message": "Step 3/6: Building dependencies with npm install",
+      "text": "Step 3/6: Building dependencies with npm install",
+      "log": {
+        "level": "INFO",
+        "source": "build",
+        "message": "Step 3/6: Building dependencies with npm install"
+      },
+      "timestamp": "2026-10-16T12:00:15.000Z"
+    }
+  },
+  "required_envelope_keys": [
+    "event_type",
+    "aggregate_id",
+    "payload",
+    "created_at"
+  ],
+  "required_payload_keys": [
+    "deployment_id",
+    "project_id",
+    "user_id",
+    "level",
+    "source",
+    "message",
+    "timestamp"
+  ],
+  "pubsub_channel_pattern": "logs:{deployment_id}"
+}

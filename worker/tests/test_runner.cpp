@@ -5,6 +5,7 @@
 #include "../include/redis_client.hpp"
 #include "../include/worker.hpp"
 #include <iostream>
+#include <fstream>
 #include <cassert>
 #include <filesystem>
 #include <thread>
@@ -546,6 +547,178 @@ void testInternalEnvFetch() {
     TEST_ASSERT(parsedEnv["NODE_ENV"] == "production", "fetchEnv ensures default NODE_ENV present");
 }
 
+void testGoldenContracts() {
+    std::cout << "\n[Suite 8] T-01 Golden Contract JSON Fixtures" << std::endl;
+
+    std::string contractsDir = "../docs/contracts";
+    if (!std::filesystem::exists(contractsDir)) {
+        contractsDir = "docs/contracts";
+    }
+    if (!std::filesystem::exists(contractsDir)) {
+        contractsDir = "../../docs/contracts";
+    }
+    TEST_ASSERT(std::filesystem::exists(contractsDir), "docs/contracts directory located");
+
+    // 1. Verify Job Contract Fixture
+    std::string jobPath = contractsDir + "/job_contract.json";
+    std::ifstream jobFile(jobPath);
+    TEST_ASSERT(jobFile.is_open(), "job_contract.json opened successfully");
+    nlohmann::json jobJson;
+    jobFile >> jobJson;
+    jobFile.close();
+
+    TEST_ASSERT(jobJson.contains("fields"), "job_contract.json contains fields");
+    auto fields = jobJson["fields"];
+    DeploymentJob job;
+    job.deployment_id = fields["deployment_id"].get<std::string>();
+    job.project_id = fields["project_id"].get<std::string>();
+    job.user_id = fields["user_id"].get<std::string>();
+    job.repo_url = fields["repo_url"].get<std::string>();
+    job.branch = fields["branch"].get<std::string>();
+    job.commit_hash = fields["commit_hash"].get<std::string>();
+    job.runtime = fields["runtime"].get<std::string>();
+    try {
+        job.port = std::stoi(fields["port"].get<std::string>());
+    } catch (...) {
+        job.port = fields["port"].get<int>();
+    }
+    job.domain = fields["domain"].get<std::string>();
+    job.project_name = fields["project_name"].get<std::string>();
+
+    TEST_ASSERT(job.deployment_id == "123e4567-e89b-12d3-a456-426614174000", "Golden job deployment_id parsed");
+    TEST_ASSERT(job.port == 3000, "Golden job port is 3000");
+    TEST_ASSERT(job.branch == "main", "Golden job branch is main");
+
+    std::string errReason;
+    bool jobValid = WorkerDaemon::validateJob(job, errReason);
+    TEST_ASSERT(jobValid, "WorkerDaemon::validateJob validates golden contract job");
+
+    // 2. Verify Event Envelope Contract Fixture
+    std::string eventPath = contractsDir + "/event_envelope_contract.json";
+    std::ifstream eventFile(eventPath);
+    TEST_ASSERT(eventFile.is_open(), "event_envelope_contract.json opened successfully");
+    nlohmann::json eventJson;
+    eventFile >> eventJson;
+    eventFile.close();
+
+    TEST_ASSERT(eventJson.contains("envelope"), "event_envelope_contract.json contains envelope");
+    auto goldenEnv = eventJson["envelope"];
+    TEST_ASSERT(goldenEnv["event_type"] == "DEPLOYMENT_COMPLETED", "Golden event_type is DEPLOYMENT_COMPLETED");
+    auto goldenPayload = goldenEnv["payload"];
+
+    RedisClient redis("127.0.0.1", 6379);
+    if (!redis.connect()) {
+        std::cout << "  ⚠️ Redis server not reachable on 127.0.0.1:6379, skipping live Redis contract verification" << std::endl;
+        return;
+    }
+
+    std::string contractStream = "stream:test_cpp_contract_events";
+    bool pubOk = redis.publishEvent(
+        contractStream,
+        goldenEnv["event_type"].get<std::string>(),
+        goldenPayload["deployment_id"].get<std::string>(),
+        goldenPayload["project_id"].get<std::string>(),
+        goldenPayload["user_id"].get<std::string>(),
+        goldenPayload["status"].get<std::string>(),
+        goldenPayload["stage"].get<std::string>(),
+        goldenPayload["container_id"].get<std::string>(),
+        goldenPayload.value("error_message", ""),
+        goldenPayload["duration_seconds"].get<int>(),
+        goldenPayload["container_name"].get<std::string>(),
+        goldenPayload["domain"].get<std::string>(),
+        goldenPayload["port"].get<int>(),
+        goldenPayload["project_name"].get<std::string>(),
+        goldenPayload["commit_hash"].get<std::string>(),
+        goldenPayload["commit_message"].get<std::string>()
+    );
+    TEST_ASSERT(pubOk, "RedisClient::publishEvent published golden contract event");
+
+    // Read back and verify envelope structure matches golden contract
+    auto* reply = static_cast<redisReply*>(
+        redisCommand(redis.getContext(), "XREVRANGE %s + - COUNT 1", contractStream.c_str())
+    );
+    std::string evType, aggId, pStr, crAt;
+    if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements > 0) {
+        auto* msg = reply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fieldsArr = msg->element[1];
+            if (fieldsArr->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fieldsArr->elements; i += 2) {
+                    std::string k = fieldsArr->element[i]->str ? fieldsArr->element[i]->str : "";
+                    std::string v = fieldsArr->element[i + 1]->str ? fieldsArr->element[i + 1]->str : "";
+                    if (k == "event_type") evType = v;
+                    else if (k == "aggregate_id") aggId = v;
+                    else if (k == "payload") pStr = v;
+                    else if (k == "created_at") crAt = v;
+                }
+            }
+        }
+        freeReplyObject(reply);
+    }
+
+    TEST_ASSERT(evType == "DEPLOYMENT_COMPLETED", "Emitted event_type matches golden contract");
+    TEST_ASSERT(aggId == "123e4567-e89b-12d3-a456-426614174000", "Emitted aggregate_id matches golden contract");
+    TEST_ASSERT(!pStr.empty() && !crAt.empty(), "Emitted created_at and payload string present");
+
+    nlohmann::json parsedPayload = nlohmann::json::parse(pStr);
+    for (const auto& requiredKey : eventJson["required_payload_keys"]) {
+        std::string k = requiredKey.get<std::string>();
+        TEST_ASSERT(parsedPayload.contains(k), "Parsed payload contains required golden key: " + k);
+    }
+    TEST_ASSERT(parsedPayload["duration_seconds"] == 24, "Payload duration_seconds matches golden contract");
+    TEST_ASSERT(parsedPayload["container_name"] == "df-123e456789ab", "Payload container_name matches golden contract");
+
+    // 3. Verify Log Envelope Contract Fixture
+    std::string logPath = contractsDir + "/log_envelope_contract.json";
+    std::ifstream logFile(logPath);
+    TEST_ASSERT(logFile.is_open(), "log_envelope_contract.json opened successfully");
+    nlohmann::json logJson;
+    logFile >> logJson;
+    logFile.close();
+
+    auto goldenLogEnv = logJson["envelope"];
+    auto goldenLogPayload = goldenLogEnv["payload"];
+
+    bool logPubOk = redis.publishLog(
+        contractStream,
+        goldenLogPayload["deployment_id"].get<std::string>(),
+        goldenLogPayload["project_id"].get<std::string>(),
+        goldenLogPayload["user_id"].get<std::string>(),
+        goldenLogPayload["level"].get<std::string>(),
+        goldenLogPayload["source"].get<std::string>(),
+        goldenLogPayload["message"].get<std::string>()
+    );
+    TEST_ASSERT(logPubOk, "RedisClient::publishLog published golden contract log");
+
+    auto* logReply = static_cast<redisReply*>(
+        redisCommand(redis.getContext(), "XREVRANGE %s + - COUNT 1", contractStream.c_str())
+    );
+    std::string logEvType, logPStr;
+    if (logReply && logReply->type == REDIS_REPLY_ARRAY && logReply->elements > 0) {
+        auto* msg = logReply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fieldsArr = msg->element[1];
+            if (fieldsArr->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fieldsArr->elements; i += 2) {
+                    std::string k = fieldsArr->element[i]->str ? fieldsArr->element[i]->str : "";
+                    std::string v = fieldsArr->element[i + 1]->str ? fieldsArr->element[i + 1]->str : "";
+                    if (k == "event_type") logEvType = v;
+                    else if (k == "payload") logPStr = v;
+                }
+            }
+        }
+        freeReplyObject(logReply);
+    }
+
+    TEST_ASSERT(logEvType == "LOG_EMITTED", "Emitted log event_type is LOG_EMITTED");
+    nlohmann::json parsedLog = nlohmann::json::parse(logPStr);
+    for (const auto& requiredKey : logJson["required_payload_keys"]) {
+        std::string k = requiredKey.get<std::string>();
+        TEST_ASSERT(parsedLog.contains(k), "Parsed log payload contains required golden key: " + k);
+    }
+    TEST_ASSERT(parsedLog["message"] == "Step 3/6: Building dependencies with npm install", "Log message matches golden contract");
+}
+
 int main() {
     std::cout << "==================================================" << std::endl;
     std::cout << "  DeployForge C++ Worker Engine Test Suite       " << std::endl;
@@ -558,6 +731,7 @@ int main() {
     testWorkerLifecycle();
     testJobValidationAndStartFailure();
     testInternalEnvFetch();
+    testGoldenContracts();
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All C++ Worker tests passed! (" << g_passed << "/" << g_total << ")" << std::endl;
