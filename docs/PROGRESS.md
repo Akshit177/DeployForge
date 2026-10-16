@@ -399,4 +399,34 @@
 - **Verification result:** VERIFIED — 22/22 backend test suites passing (100%), 68/68 C++ tests passing, frontend Vite build clean.
 - **Anything deferred:** None.
 
+### F-13: Remove silent branch fallback and persist real git commit SHA
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Removed silent branch fallback in C++ worker (`worker/include/process_runner.hpp`): eliminated the nested retry without `-b` in `ProcessRunner::cloneRepository`. If git clone fails on the requested branch, it returns error immediately rather than falling back to default branch.
+  - Added git commit resolution in C++ worker (`worker/src/worker.cpp`): checks out `job.commit_hash` when specified (with shallow fetch fallback), runs `git rev-parse HEAD` and `git log -1 --pretty=%s` to resolve the actual commit hash and message from the workspace, and propagates `commit_hash` and `commit_message` in `STAGE_CHANGED` and `DEPLOYMENT_COMPLETED` events.
+  - Updated C++ Redis client (`worker/include/redis_client.hpp`, `worker/src/redis_client.cpp`) to serialize `commit_hash` and `commit_message` in event payload JSON.
+  - Removed silent branch fallback in Node worker (`backend/workers/deploymentWorker.js`): removed nested fallback clone without `-b`. Throws an explicit error on branch clone failures. Added `git checkout <commit_hash>`, `git rev-parse HEAD`, and `git log -1 --pretty=%s` resolution after cloning.
+  - Updated `backend/workers/persistenceWorker.js`: on `STAGE_CHANGED` and `DEPLOYMENT_COMPLETED`, extracts `commit_hash` and `commit_message`, persists them to `deployments.commit_hash` and `deployments.commit_message` via `COALESCE`, and updates `projects.latest_commit` with the resolved SHA upon completion.
+  - Added test suite `backend/tests/f13_branch_commit.test.js` covering bogus branch clone failure without fallback to default, persistence of commit hash/message to deployments and projects, and checkout of specific commit SHA.
+  - Updated C++ test suite `worker/tests/test_runner.cpp` with unit assertions verifying `cloneRepository` rejects nonexistent branches without fallback and that `commit_hash` is emitted in completion payloads (72/72 tests passing).
+  - Wired `tests/f13_branch_commit.test.js` into `backend/package.json` test script.
+- **Files touched:**
+  - `worker/include/process_runner.hpp`
+  - `worker/include/redis_client.hpp`
+  - `worker/src/redis_client.cpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `backend/workers/deploymentWorker.js`
+  - `backend/workers/persistenceWorker.js`
+  - `backend/tests/f13_branch_commit.test.js`
+  - `backend/package.json`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/f13_branch_commit.test.js`: 3 tests (bogus branch failure without fallback, persistence worker commit hash/message persistence, checkout of specific commit hash).
+  - `worker/tests/test_runner.cpp`: 4 new assertions covering nonexistent branch rejection in `cloneRepository`, non-empty destination check, valid branch clone, and `commit_hash` verification in lifecycle completion payload.
+- **Verification result:** VERIFIED — 23/23 backend test suites passing (100%), 72/72 C++ tests passing, frontend Vite build clean.
+- **Anything deferred:** None.
+
+
 

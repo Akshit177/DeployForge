@@ -164,6 +164,13 @@ public:
         return result;
     }
 
+    static std::string trim(const std::string& str) {
+        size_t first = str.find_first_not_of(" \t\n\r");
+        if (first == std::string::npos) return "";
+        size_t last = str.find_last_not_of(" \t\n\r");
+        return str.substr(first, (last - first + 1));
+    }
+
     static CommandResult cloneRepository(
         const std::string& repoUrl,
         const std::string& branch,
@@ -177,18 +184,7 @@ public:
             repoUrl,
             targetDir
         };
-        auto res = executeCommand("git", args, "", timeoutSeconds);
-        if (!res.success() && !branch.empty() && branch != "main") {
-            // Retry without specific branch if failed
-            std::vector<std::string> fallbackArgs = {
-                "clone",
-                "--depth", "1",
-                repoUrl,
-                targetDir
-            };
-            res = executeCommand("git", fallbackArgs, "", timeoutSeconds);
-        }
-        return res;
+        return executeCommand("git", args, "", timeoutSeconds);
     }
 };
 

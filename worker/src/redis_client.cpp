@@ -135,6 +135,7 @@ std::optional<DeploymentJob> RedisClient::readNextJob(
                             else if (key == "repo_url") job.repo_url = val;
                             else if (key == "branch") job.branch = val;
                             else if (key == "commit_hash") job.commit_hash = val;
+                            else if (key == "commit_message") job.commit_message = val;
                             else if (key == "runtime") job.runtime = val;
                             else if (key == "port") {
                                 try { job.port = std::stoi(val); } catch (...) { job.port = 3000; }
@@ -242,7 +243,9 @@ bool RedisClient::publishEvent(
     const std::string& containerName,
     const std::string& domain,
     int port,
-    const std::string& projectName
+    const std::string& projectName,
+    const std::string& commitHash,
+    const std::string& commitMessage
 ) {
     reconnectIfBroken();
     if (!isConnected()) return false;
@@ -272,6 +275,12 @@ bool RedisClient::publishEvent(
     }
     if (!errorMessage.empty()) {
         payload["error_message"] = errorMessage;
+    }
+    if (!commitHash.empty()) {
+        payload["commit_hash"] = commitHash;
+    }
+    if (!commitMessage.empty()) {
+        payload["commit_message"] = commitMessage;
     }
     payload["duration_seconds"] = durationSeconds;
     payload["timestamp"] = nowIso;

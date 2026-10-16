@@ -51,8 +51,19 @@ async function applyEventTransaction(client, eventType, payload) {
     domain,
     port,
     project_name,
+    commit_hash,
+    commit_message,
     log,
   } = payload;
+
+  const cleanCommitHash =
+    commit_hash && commit_hash !== "HEAD" && String(commit_hash).trim()
+      ? String(commit_hash).trim().slice(0, 40)
+      : null;
+  const cleanCommitMessage =
+    commit_message && String(commit_message).trim()
+      ? String(commit_message).trim()
+      : null;
 
   const validDepId = isValidUuid(deployment_id) ? deployment_id : null;
   const validProjId = isValidUuid(project_id) ? project_id : null;
@@ -75,10 +86,13 @@ async function applyEventTransaction(client, eventType, payload) {
       if (validDepId && targetStatus) {
         const depRes = await client.query(
           `UPDATE deployments
-           SET status = $1, updated_at = NOW()
-           WHERE id = $2 AND status = ANY($3::varchar[])
+           SET status = $1,
+               commit_hash = COALESCE($2, commit_hash),
+               commit_message = COALESCE($3, commit_message),
+               updated_at = NOW()
+           WHERE id = $4 AND status = ANY($5::varchar[])
            RETURNING id, status`,
-          [targetStatus, validDepId, allowedFrom]
+          [targetStatus, cleanCommitHash, cleanCommitMessage, validDepId, allowedFrom]
         );
         if (depRes.rows.length === 0) {
           console.warn(`[Persistence Worker] STAGE_CHANGED ignored for deployment ${validDepId}: transition to ${targetStatus} not allowed from current status`);
@@ -104,10 +118,12 @@ async function applyEventTransaction(client, eventType, payload) {
                duration_seconds = COALESCE($1, duration_seconds),
                container_id = COALESCE($2, container_id),
                container_name = COALESCE($3, container_name),
+               commit_hash = COALESCE($4, commit_hash),
+               commit_message = COALESCE($5, commit_message),
                updated_at = NOW()
-           WHERE id = $4 AND status = ANY($5::varchar[])
+           WHERE id = $6 AND status = ANY($7::varchar[])
            RETURNING id, status`,
-          [duration_seconds || 0, container_id || null, depContainerName, validDepId, allowedFrom]
+          [duration_seconds || 0, container_id || null, depContainerName, cleanCommitHash, cleanCommitMessage, validDepId, allowedFrom]
         );
         if (depRes.rows.length === 0) {
           console.warn(`[Persistence Worker] DEPLOYMENT_COMPLETED ignored for deployment ${validDepId}: transition to RUNNING not allowed from current status`);
@@ -116,9 +132,13 @@ async function applyEventTransaction(client, eventType, payload) {
       }
       if (activeProjId) {
         const projRes = await client.query(
-          `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1
+          `UPDATE projects
+           SET status = 'RUNNING',
+               latest_commit = COALESCE($1, latest_commit),
+               updated_at = NOW()
+           WHERE id = $2
            RETURNING id, name, domain, port`,
-          [activeProjId]
+          [cleanCommitHash, activeProjId]
         );
         const proj = projRes.rows[0];
         const routeDomain = domain || (proj && proj.domain);

@@ -56,6 +56,33 @@ void testProcessRunner() {
     bool cleaned = ProcessRunner::cleanupWorkspace(ws);
     TEST_ASSERT(cleaned, "Workspace directory cleaned up");
     TEST_ASSERT(!std::filesystem::exists(ws), "Workspace path deleted");
+
+    // F-13: Test that cloneRepository rejects invalid branch without fallback to main/default
+    std::string testRepo = "/tmp/df_test_git_repo";
+    std::filesystem::remove_all(testRepo);
+    std::filesystem::create_directories(testRepo);
+    ProcessRunner::executeCommand("git", {"init"}, testRepo);
+    ProcessRunner::executeCommand("git", {"config", "user.name", "TestUser"}, testRepo);
+    ProcessRunner::executeCommand("git", {"config", "user.email", "test@test.com"}, testRepo);
+    ProcessRunner::executeCommand("sh", {"-c", "echo hello > file.txt"}, testRepo);
+    ProcessRunner::executeCommand("git", {"add", "."}, testRepo);
+    ProcessRunner::executeCommand("git", {"commit", "-m", "initial commit"}, testRepo);
+
+    std::string cloneDst = "/tmp/df_test_clone_dst";
+    std::filesystem::remove_all(cloneDst);
+    auto badBranchRes = ProcessRunner::cloneRepository(testRepo, "nonexistent-branch-xyz", cloneDst);
+    TEST_ASSERT(!badBranchRes.success(), "cloneRepository rejects nonexistent branch and does not fallback to default");
+    TEST_ASSERT(!std::filesystem::exists(cloneDst) || std::filesystem::is_empty(cloneDst), "clone destination not populated after failed branch clone");
+
+    std::filesystem::remove_all(cloneDst);
+    auto goodBranchRes = ProcessRunner::cloneRepository(testRepo, "master", cloneDst);
+    if (!goodBranchRes.success()) {
+        goodBranchRes = ProcessRunner::cloneRepository(testRepo, "main", cloneDst);
+    }
+    TEST_ASSERT(goodBranchRes.success(), "cloneRepository succeeds for valid branch");
+
+    std::filesystem::remove_all(testRepo);
+    std::filesystem::remove_all(cloneDst);
 }
 
 void testDockerClientSimulator() {
@@ -241,6 +268,7 @@ void testWorkerLifecycle() {
     nlohmann::json parsed = nlohmann::json::parse(payloadStr);
     TEST_ASSERT(parsed["container_name"] == "df-111111111111", "Worker emitted container_name df-111111111111");
     TEST_ASSERT(parsed["domain"] == "cpp-test.deployforge.app", "Worker emitted domain in payload");
+    TEST_ASSERT(parsed["commit_hash"] == "abcdef123456", "Worker emitted commit_hash in payload");
 }
 
 void testJobValidationAndStartFailure() {

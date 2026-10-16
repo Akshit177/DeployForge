@@ -156,22 +156,63 @@ async function processJob(jobData, messageId) {
 
     workspacePath = getWorkspacePath(deployment_id);
 
-    // If repository URL is a valid remote git URL, clone it
+    // If repository URL is a valid remote git URL or local path
     const isGitUrl =
       repo_url &&
-      (repo_url.startsWith("http://") || repo_url.startsWith("https://") || repo_url.startsWith("git@"));
+      (repo_url.startsWith("http://") ||
+        repo_url.startsWith("https://") ||
+        repo_url.startsWith("git@") ||
+        repo_url.startsWith("file://") ||
+        fs.existsSync(repo_url));
+
+    let actualCommitHash = commit_hash && commit_hash !== "HEAD" ? commit_hash : null;
+    let actualCommitMessage = null;
 
     if (isGitUrl) {
       try {
         await execFileAsync("git", ["clone", "--depth", "1", "-b", branch || "main", repo_url, workspacePath]);
       } catch (gitErr) {
-        try {
-          await execFileAsync("git", ["clone", "--depth", "1", repo_url, workspacePath]);
-        } catch (gitErr2) {
-          if (getMode() === "real") {
-            throw new Error(`Git clone failed for ${repo_url}: ${gitErr2.message}`);
+        if (
+          getMode() === "real" ||
+          fs.existsSync(repo_url) ||
+          repo_url.startsWith("file://") ||
+          gitErr.message.includes("Remote branch")
+        ) {
+          throw new Error(`Git clone failed for ${repo_url} (branch: ${branch || "main"}): ${gitErr.message}`);
+        }
+      }
+
+      // Check if .git directory exists in cloned workspace
+      if (fs.existsSync(path.join(workspacePath, ".git"))) {
+        // If specific commit_hash was requested (and not HEAD)
+        if (commit_hash && commit_hash !== "HEAD") {
+          try {
+            await execFileAsync("git", ["checkout", commit_hash], { cwd: workspacePath });
+          } catch (checkoutErr) {
+            try {
+              await execFileAsync("git", ["fetch", "--depth", "1", "origin", commit_hash], { cwd: workspacePath });
+              await execFileAsync("git", ["checkout", commit_hash], { cwd: workspacePath });
+            } catch (fetchErr) {
+              if (getMode() === "real" || fs.existsSync(repo_url) || repo_url.startsWith("file://")) {
+                throw new Error(`Commit hash not found: ${commit_hash}`);
+              }
+            }
           }
         }
+
+        try {
+          const { stdout: revStdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspacePath });
+          if (revStdout && revStdout.trim()) {
+            actualCommitHash = revStdout.trim();
+          }
+        } catch (_) {}
+
+        try {
+          const { stdout: msgStdout } = await execFileAsync("git", ["log", "-1", "--pretty=%s"], { cwd: workspacePath });
+          if (msgStdout && msgStdout.trim()) {
+            actualCommitMessage = msgStdout.trim();
+          }
+        } catch (_) {}
       }
     }
 
@@ -194,6 +235,7 @@ async function processJob(jobData, messageId) {
       progress_pct: 50,
       domain,
       port: configuredPort,
+      ...(actualCommitHash ? { commit_hash: actualCommitHash } : {}),
     });
 
     await publishDeploymentEvent("STAGE_CHANGED", {
@@ -202,11 +244,18 @@ async function processJob(jobData, messageId) {
       user_id,
       status: "BUILDING",
       stage: "build",
+      commit_hash: actualCommitHash,
+      commit_message: actualCommitMessage,
     });
 
     await pool.query(
-      `UPDATE deployments SET status = 'BUILDING', updated_at = NOW() WHERE id = $1`,
-      [deployment_id]
+      `UPDATE deployments
+       SET status = 'BUILDING',
+           commit_hash = COALESCE($1, commit_hash),
+           commit_message = COALESCE($2, commit_message),
+           updated_at = NOW()
+       WHERE id = $3`,
+      [actualCommitHash, actualCommitMessage, deployment_id]
     );
     await pool.query(
       `UPDATE projects SET status = 'BUILDING', updated_at = NOW() WHERE id = $1`,
@@ -340,6 +389,7 @@ async function processJob(jobData, messageId) {
       duration_seconds: durationSec,
       domain,
       public_url: `https://${domain}`,
+      ...(actualCommitHash ? { commit_hash: actualCommitHash } : {}),
     });
 
     // Emit deployment completed event
@@ -354,6 +404,8 @@ async function processJob(jobData, messageId) {
       domain,
       port: internalPort,
       project_name: projectName,
+      commit_hash: actualCommitHash,
+      commit_message: actualCommitMessage,
     });
 
     await pool.query(
@@ -362,13 +414,19 @@ async function processJob(jobData, messageId) {
            duration_seconds = $1,
            container_id = $2,
            container_name = $3,
+           commit_hash = COALESCE($4, commit_hash),
+           commit_message = COALESCE($5, commit_message),
            updated_at = NOW()
-       WHERE id = $4`,
-      [durationSec, containerId, containerName, deployment_id]
+       WHERE id = $6`,
+      [durationSec, containerId, containerName, actualCommitHash, actualCommitMessage, deployment_id]
     );
     await pool.query(
-      `UPDATE projects SET status = 'RUNNING', updated_at = NOW() WHERE id = $1`,
-      [project_id]
+      `UPDATE projects
+       SET status = 'RUNNING',
+           latest_commit = COALESCE($1, latest_commit),
+           updated_at = NOW()
+       WHERE id = $2`,
+      [actualCommitHash, project_id]
     );
 
     // Register in dynamic reverse proxy routing table

@@ -167,11 +167,42 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
 
         workspacePath = ProcessRunner::getWorkspacePath(m_cfg.workspace_base_path, job.deployment_id);
 
+        std::string actualCommitHash = (!job.commit_hash.empty() && job.commit_hash != "HEAD") ? job.commit_hash : "";
+        std::string actualCommitMessage = (!job.commit_message.empty()) ? job.commit_message : "";
+
         if (!job.repo_url.empty() && (job.repo_url.rfind("http://", 0) == 0 || job.repo_url.rfind("https://", 0) == 0)) {
             Logger::info("Worker", "Cloning repository " + job.repo_url + " (" + job.branch + ")");
             auto cloneRes = ProcessRunner::cloneRepository(job.repo_url, job.branch, workspacePath, 120);
-            if (!cloneRes.success() && m_docker.getMode() == "real") {
-                throw std::runtime_error("Git clone failed: " + cloneRes.output);
+            if (!cloneRes.success()) {
+                if (m_docker.getMode() == "real") {
+                    throw std::runtime_error("Git clone failed: " + cloneRes.output);
+                }
+            } else {
+                // If specific commit_hash requested and not HEAD
+                if (!job.commit_hash.empty() && job.commit_hash != "HEAD") {
+                    auto checkoutRes = ProcessRunner::executeCommand("git", {"checkout", job.commit_hash}, workspacePath, 30);
+                    if (!checkoutRes.success()) {
+                        auto fetchRes = ProcessRunner::executeCommand("git", {"fetch", "--depth", "1", "origin", job.commit_hash}, workspacePath, 30);
+                        if (fetchRes.success()) {
+                            checkoutRes = ProcessRunner::executeCommand("git", {"checkout", job.commit_hash}, workspacePath, 30);
+                        }
+                    }
+                    if (!checkoutRes.success() && m_docker.getMode() == "real") {
+                        throw std::runtime_error("Commit hash not found: " + job.commit_hash);
+                    }
+                }
+
+                // Resolve HEAD commit hash
+                auto revRes = ProcessRunner::executeCommand("git", {"rev-parse", "HEAD"}, workspacePath, 10);
+                if (revRes.success()) {
+                    actualCommitHash = ProcessRunner::trim(revRes.output);
+                }
+
+                // Resolve commit message
+                auto logRes = ProcessRunner::executeCommand("git", {"log", "-1", "--pretty=%s"}, workspacePath, 10);
+                if (logRes.success()) {
+                    actualCommitMessage = ProcessRunner::trim(logRes.output);
+                }
             }
         }
 
@@ -186,7 +217,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         m_redis.publishEvent(
             m_cfg.redis_events_stream, "STAGE_CHANGED",
             job.deployment_id, job.project_id, job.user_id,
-            "BUILDING", "build"
+            "BUILDING", "build", "", "", 0, "", "", 0, "",
+            actualCommitHash, actualCommitMessage
         );
 
         prepareDockerfile(workspacePath);
@@ -246,7 +278,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             m_cfg.redis_events_stream, "DEPLOYMENT_COMPLETED",
             job.deployment_id, job.project_id, job.user_id,
             "RUNNING", "running", formattedContainerId, "", durationSeconds,
-            containerName, job.domain, job.port, job.project_name
+            containerName, job.domain, job.port, job.project_name,
+            actualCommitHash, actualCommitMessage
         );
 
         Logger::step("Worker", "Deployment " + job.deployment_id + " successfully RUNNING at " + publicUrl);

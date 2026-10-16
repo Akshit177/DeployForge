@@ -15,6 +15,7 @@ struct DeploymentJob {
     std::string repo_url;
     std::string branch = "main";
     std::string commit_hash = "HEAD";
+    std::string commit_message = "";
     std::string runtime = "node";
     int port = 3000;
     std::string domain;
@@ -65,7 +66,9 @@ public:
         const std::string& containerName = "",
         const std::string& domain = "",
         int port = 0,
-        const std::string& projectName = ""
+        const std::string& projectName = "",
+        const std::string& commitHash = "",
+        const std::string& commitMessage = ""
     );
 
     bool acknowledgeJob(
