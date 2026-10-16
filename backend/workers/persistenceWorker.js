@@ -15,6 +15,7 @@ const {
   getAllowedPreviousStatuses,
   normalizeStatus,
 } = require("../services/statusMachine.js");
+const { emitDeploymentLog } = require("../services/logEmitter.js");
 
 const CONSUMER_NAME = `persistence-${process.pid}`;
 let isLoopRunning = false;
@@ -228,21 +229,51 @@ async function applyEventTransaction(client, eventType, payload) {
       break;
   }
 
-  // Insert log row if attached to event
-  if (log && validDepId && validProjId && validUserId) {
-    await client.query(
-      `INSERT INTO logs (deployment_id, project_id, user_id, level, source, message)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        validDepId,
-        validProjId,
-        validUserId,
-        log.level || "INFO",
-        log.source || "worker",
-        log.message || log.text || "",
-      ]
-    );
+  const insertedLogs = [];
+
+  let logData = null;
+  if (eventType === "LOG_EMITTED") {
+    logData = log || {
+      level: payload.level,
+      source: payload.source,
+      message: payload.message || payload.text,
+    };
+  } else if (log) {
+    logData = log;
   }
+
+  if (logData && validDepId) {
+    let logProjId = activeProjId;
+    let logUserId = validUserId;
+    if (!logProjId || !logUserId) {
+      const depRow = await client.query("SELECT project_id, user_id FROM deployments WHERE id = $1", [validDepId]);
+      if (depRow.rows.length > 0) {
+        if (!logProjId && isValidUuid(depRow.rows[0].project_id)) logProjId = depRow.rows[0].project_id;
+        if (!logUserId && isValidUuid(depRow.rows[0].user_id)) logUserId = depRow.rows[0].user_id;
+      }
+    }
+
+    if (logProjId && logUserId) {
+      const logRes = await client.query(
+        `INSERT INTO logs (deployment_id, project_id, user_id, level, source, message)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [
+          validDepId,
+          logProjId,
+          logUserId,
+          String(logData.level || "INFO").toUpperCase(),
+          String(logData.source || "worker").slice(0, 50),
+          String(logData.message || logData.text || ""),
+        ]
+      );
+      if (logRes.rows.length > 0) {
+        insertedLogs.push(logRes.rows[0]);
+      }
+    }
+  }
+
+  return { insertedLogs };
 }
 
 /**
@@ -308,11 +339,52 @@ async function processEvent(messageId, eventType, rawPayload, fullEntry = null) 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await applyEventTransaction(client, eventType, payload);
+    const { insertedLogs } = await applyEventTransaction(client, eventType, payload);
     await client.query("COMMIT");
 
     // ACK Redis event ONLY AFTER durable PostgreSQL transaction commits
-    await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId);
+    try {
+      if (messageId) {
+        await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId);
+      }
+    } catch (ackErr) {
+      if (ackErr.message && ackErr.message.includes("NOGROUP")) {
+        try {
+          await ensurePersistenceGroup();
+          await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId);
+        } catch (_) {}
+      } else {
+        console.warn("XACK notice:", ackErr.message);
+      }
+    }
+
+    // Publish inserted logs to Redis pub/sub channels
+    if (insertedLogs && insertedLogs.length > 0) {
+      for (const logRow of insertedLogs) {
+        const d = new Date(logRow.created_at);
+        const timeStr = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+        const logPayload = {
+          id: logRow.id,
+          deployment_id: logRow.deployment_id,
+          project_id: logRow.project_id,
+          user_id: logRow.user_id,
+          level: logRow.level,
+          source: logRow.source,
+          text: logRow.message,
+          message: logRow.message,
+          time: timeStr,
+          created_at: logRow.created_at ? logRow.created_at.toISOString() : new Date().toISOString(),
+          timestamp: logRow.created_at ? logRow.created_at.toISOString() : new Date().toISOString(),
+        };
+
+        if (redis.status === "ready" || redis.status === "connecting") {
+          await redis.publish(`logs:${logPayload.deployment_id}`, JSON.stringify(logPayload)).catch(() => {});
+          await redis.publish(`project:${logPayload.project_id}`, JSON.stringify(logPayload)).catch(() => {});
+        }
+        emitDeploymentLog(logPayload.deployment_id, logPayload);
+      }
+    }
+
     return true;
   } catch (dbErr) {
     await client.query("ROLLBACK").catch(() => {});

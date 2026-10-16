@@ -105,10 +105,16 @@ describe("T-02: Comprehensive Authorization Matrix Test Suite", () => {
     "POST /api/auth/logout",
   ]);
 
+  const activeSockets = new Set();
+
   before(async () => {
     const app = createApp();
     enumeratedRoutes = enumerateRoutes(app);
     server = app.listen(0);
+    server.on("connection", (s) => {
+      activeSockets.add(s);
+      s.once("close", () => activeSockets.delete(s));
+    });
     const port = server.address().port;
     baseUrl = `http://localhost:${port}`;
 
@@ -218,6 +224,12 @@ describe("T-02: Comprehensive Authorization Matrix Test Suite", () => {
   });
 
   after(async () => {
+    for (const socket of activeSockets) {
+      try {
+        socket.destroy();
+      } catch (_) {}
+    }
+    activeSockets.clear();
     if (server) {
       if (typeof server.closeAllConnections === "function") {
         server.closeAllConnections();
@@ -507,6 +519,7 @@ describe("T-02: Comprehensive Authorization Matrix Test Suite", () => {
       });
       assert.equal(res.status, 200);
       ac.abort();
+      await res.body.cancel().catch(() => {});
     });
 
     it("GET /api/routing/resolve/:domain -> 200 for owner", async () => {

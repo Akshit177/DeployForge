@@ -298,6 +298,10 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             job.deployment_id, job.project_id, job.user_id,
             "FAILED", "failed", "", errorReason, 0
         );
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "ERROR", "worker", "Job validation rejected: " + errorReason
+        );
         m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);
         return false;
     }
@@ -316,6 +320,10 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             m_cfg.redis_events_stream, "STAGE_CHANGED",
             job.deployment_id, job.project_id, job.user_id,
             "CLONING", "clone"
+        );
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "clone", "Cloning repository " + job.repo_url + " (" + job.branch + ")"
         );
 
         workspacePath = ProcessRunner::getWorkspacePath(m_cfg.workspace_base_path, job.deployment_id);
@@ -359,6 +367,11 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             }
         }
 
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "clone", "Repository cloned successfully. Commit: " + (actualCommitHash.empty() ? "HEAD" : actualCommitHash.substr(0, 7))
+        );
+
         ensureWorkspaceAppFiles(workspacePath, job);
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
@@ -377,8 +390,16 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         prepareDockerfile(workspacePath);
         std::string imageName = "deployforge-" + job.project_name + ":" + job.deployment_id.substr(0, 8);
         Logger::info("Worker", "Building container image: " + imageName);
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "build", "Building container image: " + imageName
+        );
 
         std::string imageId = m_docker.buildImage(workspacePath, imageName);
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "build", "Container image built successfully: " + imageId
+        );
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         // 3. Stage: STARTING (80%)
@@ -398,6 +419,11 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         if (job.project_name.find("crash") != std::string::npos) {
             containerName += "-crash";
         }
+
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "deploy", "Starting container " + containerName + " (port " + std::to_string(job.port) + ") and awaiting readiness probe..."
+        );
 
         CreateContainerParams cParams;
         cParams.image_name = imageName;
@@ -447,6 +473,11 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             actualCommitHash, actualCommitMessage
         );
 
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "INFO", "deploy", "Container is healthy and RUNNING at " + publicUrl
+        );
+
         Logger::step("Worker", "Deployment " + job.deployment_id + " successfully RUNNING at " + publicUrl);
 
         m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);
@@ -466,6 +497,11 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
             m_cfg.redis_events_stream, "DEPLOYMENT_FAILED",
             job.deployment_id, job.project_id, job.user_id,
             "FAILED", "failed", "", e.what(), durationSeconds
+        );
+
+        m_redis.publishLog(
+            m_cfg.redis_events_stream, job.deployment_id, job.project_id, job.user_id,
+            "ERROR", "worker", "Deployment failed: " + std::string(e.what())
         );
 
         m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);

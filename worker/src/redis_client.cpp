@@ -307,6 +307,58 @@ bool RedisClient::publishEvent(
     return true;
 }
 
+bool RedisClient::publishLog(
+    const std::string& eventsStream,
+    const std::string& deploymentId,
+    const std::string& projectId,
+    const std::string& userId,
+    const std::string& level,
+    const std::string& source,
+    const std::string& message
+) {
+    reconnectIfBroken();
+    if (!isConnected()) return false;
+
+    std::string nowIso = currentTimestampIso();
+
+    nlohmann::json payload;
+    payload["deployment_id"] = deploymentId;
+    payload["project_id"] = projectId;
+    payload["user_id"] = userId;
+    payload["level"] = level;
+    payload["source"] = source;
+    payload["message"] = message;
+    payload["text"] = message;
+
+    nlohmann::json logObj;
+    logObj["level"] = level;
+    logObj["source"] = source;
+    logObj["message"] = message;
+    payload["log"] = logObj;
+    payload["timestamp"] = nowIso;
+
+    std::string payloadStr = payload.dump();
+
+    std::vector<const char*> argv = {
+        "XADD", eventsStream.c_str(), "*",
+        "event_type", "LOG_EMITTED",
+        "aggregate_id", deploymentId.c_str(),
+        "payload", payloadStr.c_str(),
+        "created_at", nowIso.c_str()
+    };
+
+    auto* reply = static_cast<redisReply*>(
+        redisCommandArgv(m_ctx, static_cast<int>(argv.size()), argv.data(), nullptr)
+    );
+
+    if (!reply) {
+        disconnect();
+        return false;
+    }
+    freeReplyObject(reply);
+    return true;
+}
+
 bool RedisClient::acknowledgeJob(
     const std::string& stream,
     const std::string& group,

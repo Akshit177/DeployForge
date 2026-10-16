@@ -31,6 +31,7 @@ describe("F-01: Deployment Event Envelope and Persistence Consumer Contract", ()
       if (redis.status !== "ready" && redis.status !== "connecting") {
         await redis.connect().catch(() => {});
       }
+      await redis.xgroup("SETID", EVENTS_STREAM, PERSISTENCE_GROUP, "$");
     } catch (_) {}
 
     // Seed test user

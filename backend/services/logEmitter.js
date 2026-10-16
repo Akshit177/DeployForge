@@ -1,5 +1,6 @@
 const EventEmitter = require("events");
 const pool = require("../config/db.js");
+const redis = require("../config/redis.js");
 
 class LogEmitter extends EventEmitter {}
 
@@ -10,9 +11,15 @@ emitter.setMaxListeners(100);
 function emitDeploymentLog(deploymentId, logEntry) {
   if (deploymentId) {
     emitter.emit(`deployment:${deploymentId}`, logEntry);
+    if (redis && (redis.status === "ready" || redis.status === "connecting")) {
+      redis.publish(`logs:${deploymentId}`, JSON.stringify(logEntry)).catch(() => {});
+    }
   }
-  if (logEntry.project_id) {
+  if (logEntry && logEntry.project_id) {
     emitter.emit(`project:${logEntry.project_id}`, logEntry);
+    if (redis && (redis.status === "ready" || redis.status === "connecting")) {
+      redis.publish(`project:${logEntry.project_id}`, JSON.stringify(logEntry)).catch(() => {});
+    }
   }
 }
 

@@ -225,6 +225,50 @@ void testRedisClient() {
     TEST_ASSERT(parsedPayload["domain"] == "cpp-test.deployforge.app", "Payload JSON contains domain");
     TEST_ASSERT(parsedPayload["port"] == 3000, "Payload JSON contains port");
     TEST_ASSERT(parsedPayload["project_name"] == "cpp-sample", "Payload JSON contains project_name");
+
+    // Test publishLog emits LOG_EMITTED event envelope
+    bool logPub = redis.publishLog(
+        "stream:test_cpp_events",
+        testDepId,
+        "proj-123",
+        "usr-123",
+        "INFO",
+        "build",
+        "Running npm install in workspace"
+    );
+    TEST_ASSERT(logPub, "publishLog succeeded");
+
+    auto* logReply = static_cast<redisReply*>(
+        redisCommand(redis.getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+    );
+    std::string logEventType;
+    std::string logAggregateId;
+    std::string logPayloadStr;
+    if (logReply && logReply->type == REDIS_REPLY_ARRAY && logReply->elements > 0) {
+        auto* msg = logReply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fields = msg->element[1];
+            if (fields->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                    if (key == "event_type") logEventType = val;
+                    else if (key == "aggregate_id") logAggregateId = val;
+                    else if (key == "payload") logPayloadStr = val;
+                }
+            }
+        }
+        freeReplyObject(logReply);
+    }
+
+    TEST_ASSERT(logEventType == "LOG_EMITTED", "Log event envelope has event_type LOG_EMITTED");
+    TEST_ASSERT(logAggregateId == testDepId, "Log event envelope has aggregate_id matching deployment ID");
+    TEST_ASSERT(!logPayloadStr.empty(), "Log event envelope contains payload JSON string");
+
+    nlohmann::json parsedLogPayload = nlohmann::json::parse(logPayloadStr);
+    TEST_ASSERT(parsedLogPayload["message"] == "Running npm install in workspace", "Log payload contains message");
+    TEST_ASSERT(parsedLogPayload["level"] == "INFO", "Log payload contains level INFO");
+    TEST_ASSERT(parsedLogPayload["source"] == "build", "Log payload contains source build");
 }
 
 void testWorkerLifecycle() {
@@ -260,18 +304,27 @@ void testWorkerLifecycle() {
 
     // Verify emitted event in events stream has container_name
     auto* reply = static_cast<redisReply*>(
-        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 10")
     );
     std::string payloadStr;
     if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements > 0) {
-        auto* msg = reply->element[0];
-        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
-            auto* fields = msg->element[1];
-            if (fields->type == REDIS_REPLY_ARRAY) {
-                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
-                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
-                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
-                    if (key == "payload") payloadStr = val;
+        for (size_t m = 0; m < reply->elements; ++m) {
+            auto* msg = reply->element[m];
+            if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+                auto* fields = msg->element[1];
+                if (fields->type == REDIS_REPLY_ARRAY) {
+                    std::string evType;
+                    std::string pStr;
+                    for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                        std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                        std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                        if (key == "event_type") evType = val;
+                        if (key == "payload") pStr = val;
+                    }
+                    if (evType == "DEPLOYMENT_COMPLETED") {
+                        payloadStr = pStr;
+                        break;
+                    }
                 }
             }
         }
@@ -392,18 +445,27 @@ void testJobValidationAndStartFailure() {
     TEST_ASSERT(!crashResult, "processSingleJob fails cleanly when readiness probe fails");
 
     auto* crashReply = static_cast<redisReply*>(
-        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 10")
     );
     std::string crashPayloadStr;
     if (crashReply && crashReply->type == REDIS_REPLY_ARRAY && crashReply->elements > 0) {
-        auto* msg = crashReply->element[0];
-        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
-            auto* fields = msg->element[1];
-            if (fields->type == REDIS_REPLY_ARRAY) {
-                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
-                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
-                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
-                    if (key == "payload") crashPayloadStr = val;
+        for (size_t m = 0; m < crashReply->elements; ++m) {
+            auto* msg = crashReply->element[m];
+            if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+                auto* fields = msg->element[1];
+                if (fields->type == REDIS_REPLY_ARRAY) {
+                    std::string evType;
+                    std::string pStr;
+                    for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                        std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                        std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                        if (key == "event_type") evType = val;
+                        if (key == "payload") pStr = val;
+                    }
+                    if (evType == "DEPLOYMENT_FAILED") {
+                        crashPayloadStr = pStr;
+                        break;
+                    }
                 }
             }
         }

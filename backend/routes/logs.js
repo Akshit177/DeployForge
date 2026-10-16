@@ -1,5 +1,6 @@
 const express = require("express");
 const pool = require("../config/db.js");
+const redis = require("../config/redis.js");
 const { authenticateToken, assertOwnsDeployment, assertOwnsProject } = require("../middleware/auth.js");
 const { parsePagination } = require("../middleware/pagination.js");
 const { verifyAccessToken } = require("../services/auth.js");
@@ -25,6 +26,8 @@ function formatLogTime(dateVal) {
 
 function formatLogEntry(l) {
   const level = (l.level || "INFO").toUpperCase();
+  const dateObj = l.created_at ? new Date(l.created_at) : new Date();
+  const isoStr = dateObj.toISOString();
   return {
     id: l.id,
     deployment_id: l.deployment_id,
@@ -35,7 +38,8 @@ function formatLogEntry(l) {
     text: l.message || "",
     message: l.message || "",
     time: formatLogTime(l.created_at),
-    created_at: l.created_at,
+    created_at: isoStr,
+    timestamp: isoStr,
   };
 }
 
@@ -73,18 +77,14 @@ router.get("/", authenticateSseOrCookie, parsePagination, async (req, res) => {
 
   try {
     const params = [req.user.id];
-    let query = `
-      SELECT l.*
-      FROM logs l
-      WHERE l.user_id = $1
-    `;
+    let whereClause = `l.user_id = $1`;
 
     if (deployment_id) {
       if (!UUID_REGEX.test(deployment_id)) {
         return res.status(400).json({ message: "Invalid deployment_id format." });
       }
       params.push(deployment_id);
-      query += ` AND l.deployment_id = $${params.length}`;
+      whereClause += ` AND l.deployment_id = $${params.length}`;
     }
 
     if (project_id) {
@@ -92,27 +92,50 @@ router.get("/", authenticateSseOrCookie, parsePagination, async (req, res) => {
         return res.status(400).json({ message: "Invalid project_id format." });
       }
       params.push(project_id);
-      query += ` AND l.project_id = $${params.length}`;
+      whereClause += ` AND l.project_id = $${params.length}`;
     }
 
     if (level && level !== "All") {
       params.push(level.toUpperCase());
-      query += ` AND UPPER(l.level) = $${params.length}`;
+      whereClause += ` AND UPPER(l.level) = $${params.length}`;
     }
 
+    let query;
     if (since) {
       params.push(since);
-      query += ` AND l.created_at > $${params.length}`;
+      whereClause += ` AND l.created_at > $${params.length}`;
+      if (until) {
+        params.push(until);
+        whereClause += ` AND l.created_at <= $${params.length}`;
+      }
+      params.push(limit);
+      params.push(offset);
+      query = `
+        SELECT l.*
+        FROM logs l
+        WHERE ${whereClause}
+        ORDER BY l.created_at ASC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+      `;
+    } else {
+      if (until) {
+        params.push(until);
+        whereClause += ` AND l.created_at <= $${params.length}`;
+      }
+      params.push(limit);
+      params.push(offset);
+      query = `
+        SELECT *
+        FROM (
+          SELECT l.*
+          FROM logs l
+          WHERE ${whereClause}
+          ORDER BY l.created_at DESC
+          LIMIT $${params.length - 1} OFFSET $${params.length}
+        ) sub
+        ORDER BY sub.created_at ASC
+      `;
     }
-
-    if (until) {
-      params.push(until);
-      query += ` AND l.created_at <= $${params.length}`;
-    }
-
-    params.push(limit);
-    params.push(offset);
-    query += ` ORDER BY l.created_at ASC LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
     const result = await pool.query(query, params);
     const logs = result.rows.map(formatLogEntry);
@@ -166,6 +189,32 @@ router.get("/stream", authenticateSseOrCookie, async (req, res) => {
   });
   res.flushHeaders?.();
 
+  let closed = false;
+  let pingInterval = null;
+  let unsubscribeEmitter = null;
+  let subClient = null;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    if (pingInterval) clearInterval(pingInterval);
+    if (unsubscribeEmitter) {
+      try { unsubscribeEmitter(); } catch (_) {}
+    }
+    if (subClient) {
+      try { subClient.disconnect(); } catch (_) {}
+    }
+    try { res.end(); } catch (_) {}
+  };
+
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+
+  if (req.destroyed || req.closed) {
+    cleanup();
+    return;
+  }
+
   // Send initial connection event
   res.write(`event: connected\ndata: ${JSON.stringify({ message: "Connected to live log stream" })}\n\n`);
 
@@ -183,40 +232,99 @@ router.get("/stream", authenticateSseOrCookie, async (req, res) => {
     }
     query += ` ORDER BY created_at DESC LIMIT 60`;
     const historical = await pool.query(query, params);
-    const initialLogs = historical.rows.reverse().map(formatLogEntry);
-    res.write(`event: init\ndata: ${JSON.stringify(initialLogs)}\n\n`);
+    if (!closed) {
+      const initialLogs = historical.rows.reverse().map(formatLogEntry);
+      res.write(`event: init\ndata: ${JSON.stringify(initialLogs)}\n\n`);
+    }
   } catch (initErr) {
     console.warn("Could not fetch initial stream logs:", initErr.message);
   }
 
-  // Listener for live logs with strict tenant isolation
+  if (closed) {
+    cleanup();
+    return;
+  }
+
+  // Deduplicate entries arriving from both Redis pub/sub and in-process emitter
+  const seenLogIds = new Set();
   const logListener = (logEntry) => {
+    if (closed) return;
     if (logEntry.user_id && logEntry.user_id !== req.user.id) {
       return;
     }
-    res.write(`event: log\ndata: ${JSON.stringify(logEntry)}\n\n`);
+    if (logEntry.id) {
+      if (seenLogIds.has(logEntry.id)) return;
+      seenLogIds.add(logEntry.id);
+      if (seenLogIds.size > 2000) {
+        const first = seenLogIds.values().next().value;
+        seenLogIds.delete(first);
+      }
+    }
+    try {
+      res.write(`event: log\ndata: ${JSON.stringify(logEntry)}\n\n`);
+    } catch (_) {
+      cleanup();
+    }
   };
 
-  let unsubscribe = null;
+  // 1. In-process emitter subscription as fallback / local
   if (deployment_id) {
-    unsubscribe = subscribeToDeploymentLogs(deployment_id, logListener);
+    unsubscribeEmitter = subscribeToDeploymentLogs(deployment_id, logListener);
   } else if (project_id) {
-    unsubscribe = subscribeToProjectLogs(project_id, logListener);
+    unsubscribeEmitter = subscribeToProjectLogs(project_id, logListener);
+  }
+
+  // 2. Redis Pub/Sub subscription using duplicate client
+  try {
+    subClient = redis.duplicate();
+    if (subClient.status !== "ready" && subClient.status !== "connecting") {
+      await subClient.connect().catch(() => {});
+    }
+
+    if (closed) {
+      cleanup();
+      return;
+    }
+
+    const channelsToSub = [];
+    if (deployment_id) {
+      channelsToSub.push(`logs:${deployment_id}`);
+    }
+    if (project_id) {
+      channelsToSub.push(`project:${project_id}`);
+    }
+
+    if (channelsToSub.length > 0) {
+      await subClient.subscribe(...channelsToSub).catch(() => {});
+      subClient.on("message", (channel, rawMessage) => {
+        if (closed) return;
+        try {
+          const entry = typeof rawMessage === "string" ? JSON.parse(rawMessage) : rawMessage;
+          const formatted = formatLogEntry(entry);
+          logListener(formatted);
+        } catch (e) {
+          // ignore parsing error
+        }
+      });
+    }
+  } catch (redisSubErr) {
+    console.warn("Redis pub/sub subscription notice:", redisSubErr.message);
+  }
+
+  if (closed) {
+    cleanup();
+    return;
   }
 
   // Send heartbeat ping every 15 seconds to prevent idle socket closing
-  const pingInterval = setInterval(() => {
-    res.write(": heartbeat\n\n");
-  }, 15000);
-
-  // Clean up on disconnect
-  req.on("close", () => {
-    clearInterval(pingInterval);
-    if (unsubscribe) {
-      unsubscribe();
+  pingInterval = setInterval(() => {
+    try {
+      res.write(": heartbeat\n\n");
+    } catch (_) {
+      cleanup();
     }
-    res.end();
-  });
+  }, 15000);
+  if (pingInterval.unref) pingInterval.unref();
 });
 
 // POST /api/logs - Ingest logs (used by workers, containers, or test harnesses)

@@ -71,6 +71,16 @@ public:
         const std::string& commitMessage = ""
     );
 
+    bool publishLog(
+        const std::string& eventsStream,
+        const std::string& deploymentId,
+        const std::string& projectId,
+        const std::string& userId,
+        const std::string& level,
+        const std::string& source,
+        const std::string& message
+    );
+
     bool acknowledgeJob(
         const std::string& stream,
         const std::string& group,
