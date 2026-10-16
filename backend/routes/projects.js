@@ -252,7 +252,7 @@ router.post("/", async (req, res) => {
         internalPort,
         isAutoDeploy,
         domain,
-        "main",
+        "HEAD",
       ]
     );
 

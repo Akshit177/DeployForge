@@ -18,7 +18,8 @@ const logRoutes = require("./routes/logs.js");
 const settingsRoutes = require("./routes/settings.js");
 const routingRoutes = require("./routes/routing.js");
 const internalRoutes = require("./routes/internal.js");
-const { syncFromDatabase } = require("./services/proxyRouter.js");
+const pool = require("./config/db.js");
+const { resolveDomain, syncFromDatabase } = require("./services/proxyRouter.js");
 const app = express();
 
 app.use(express.json());
@@ -121,11 +122,48 @@ app.use(async (req, res, next) => {
     );
 
     proxyReq.on("error", (err) => {
+      // If direct proxying to Docker container name failed (e.g. API running on host machine outside Docker network),
+      // fallback to forwarding to local Nginx edge proxy on 127.0.0.1:80
+      if ((err.code === "ENOTFOUND" || err.code === "ECONNREFUSED") && proxyTargetHost !== "127.0.0.1" && proxyTargetHost !== "localhost") {
+        const edgeReq = http.request(
+          {
+            host: "127.0.0.1",
+            port: 80,
+            path: req.url,
+            method: req.method,
+            headers: {
+              ...req.headers,
+              host: hostHeader,
+              "x-forwarded-for": req.ip || req.socket.remoteAddress,
+              "x-forwarded-proto": req.protocol,
+              "x-real-ip": req.ip || req.socket.remoteAddress,
+            },
+            timeout: 10000,
+          },
+          (edgeRes) => {
+            res.writeHead(edgeRes.statusCode, edgeRes.headers);
+            edgeRes.pipe(res);
+          }
+        );
+        edgeReq.on("error", (edgeErr) => {
+          console.warn(`[ProxyRouter] Edge proxy fallback error for ${hostHeader}:`, edgeErr.message);
+          if (!res.headersSent) {
+            res.status(502).json({
+              message: `DeployForge upstream connection failed for ${hostHeader}`,
+              error: err.message,
+            });
+          }
+        });
+        return;
+      }
+
       console.warn(`[ProxyRouter] Upstream connection error for ${hostHeader}:`, err.message);
-      res.status(502).json({
-        message: `DeployForge upstream connection failed for ${hostHeader}`,
-        error: err.message,
-      });
+      if (!res.headersSent) {
+        res.status(502).json({
+          message: `DeployForge upstream connection failed for ${hostHeader}`,
+          error: err.message,
+        });
+      }
     });
 
     req.pipe(proxyReq);

@@ -225,16 +225,22 @@ async function executeSingleWrite(explicitContent) {
     // 1. Write updated upstream configuration to unique .tmp file
     await fs.promises.writeFile(tmpPath, configContent, "utf-8");
 
-    // 2. Syntax validation (if real mode)
+    // 2. POSIX atomic rename over active upstream config
+    await fs.promises.rename(tmpPath, UPSTREAMS_CONF_FILE);
+    syncStats.actualWriteCount++;
+
+    // 3. Syntax validation (if real mode)
     const validation = await validateNginxConfig();
     if (!validation.valid) {
+      console.warn("Nginx configuration validation failed, rolling back:", validation.error);
       try {
-        if (fs.existsSync(tmpPath)) {
-          await fs.promises.unlink(tmpPath);
+        if (prevConfig !== null) {
+          await fs.promises.writeFile(UPSTREAMS_CONF_FILE, prevConfig, "utf-8");
+        } else {
+          await fs.promises.unlink(UPSTREAMS_CONF_FILE);
         }
       } catch (_) {}
 
-      console.warn("Nginx configuration validation failed:", validation.error);
       return {
         synced: false,
         path: UPSTREAMS_CONF_FILE,
@@ -243,10 +249,6 @@ async function executeSingleWrite(explicitContent) {
         error: validation.error,
       };
     }
-
-    // 3. POSIX atomic rename over active upstream config
-    await fs.promises.rename(tmpPath, UPSTREAMS_CONF_FILE);
-    syncStats.actualWriteCount++;
 
     // 4. Reload Nginx
     const reloadResult = await reloadNginx();

@@ -240,8 +240,31 @@ std::string DockerClient::createContainer(const CreateContainerParams& params) {
 
     j["Env"] = params.env;
 
-    if (!params.network_name.empty()) {
-        j["NetworkingConfig"]["EndpointsConfig"][params.network_name] = nlohmann::json::object();
+    std::string resolvedNetwork = params.network_name;
+    if (!resolvedNetwork.empty()) {
+        try {
+            std::string netListStr = sendHttpRequest("GET", "/networks");
+            auto netList = nlohmann::json::parse(netListStr);
+            bool foundExact = false;
+            std::string candidate;
+            for (const auto& net : netList) {
+                if (net.contains("Name") && net["Name"].is_string()) {
+                    std::string nName = net["Name"];
+                    if (nName == resolvedNetwork) {
+                        foundExact = true;
+                        break;
+                    }
+                    if (nName.find(resolvedNetwork) != std::string::npos) {
+                        candidate = nName;
+                    }
+                }
+            }
+            if (!foundExact && !candidate.empty()) {
+                resolvedNetwork = candidate;
+            }
+        } catch (...) {}
+
+        j["NetworkingConfig"]["EndpointsConfig"][resolvedNetwork] = nlohmann::json::object();
     }
 
     std::string body = j.dump();

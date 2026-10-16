@@ -4,7 +4,10 @@ const { verifyAccessToken } = require("../services/auth.js");
 const { getSession } = require("../services/sessionService.js");
 
 async function authenticateToken(req, res, next) {
-    const token = req.cookies?.token;
+    let token = req.cookies?.token;
+    if (!token && req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
+        token = req.headers.authorization.slice(7).trim();
+    }
 
     if (!token) {
         return res.status(401).json({ message: "Access denied. No token provided." });

@@ -719,6 +719,80 @@ void testGoldenContracts() {
     TEST_ASSERT(parsedLog["message"] == "Step 3/6: Building dependencies with npm install", "Log message matches golden contract");
 }
 
+void testPrepareDockerfile() {
+    std::cout << "\n[Suite 9] Intelligent Dockerfile Preparation" << std::endl;
+    Config cfg;
+    WorkerDaemon worker(cfg);
+
+    // Case 1: Vite / Frontend SPA with build script and no start script (like LogicLab)
+    std::string testDirVite = "/tmp/df_test_vite_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDirVite);
+    {
+        std::ofstream pkg(testDirVite + "/package.json");
+        pkg << R"({
+  "name": "logiclab",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^6.0.1"
+  }
+})";
+        pkg.close();
+    }
+    worker.prepareDockerfile(testDirVite);
+    TEST_ASSERT(std::filesystem::exists(testDirVite + "/Dockerfile"), "Dockerfile generated for Vite/SPA repo");
+    {
+        std::ifstream df(testDirVite + "/Dockerfile");
+        std::string content((std::istreambuf_iterator<char>(df)), std::istreambuf_iterator<char>());
+        TEST_ASSERT(content.find("AS builder") != std::string::npos, "Vite Dockerfile uses multi-stage builder");
+        TEST_ASSERT(content.find("npm run build") != std::string::npos, "Vite Dockerfile executes npm run build");
+        TEST_ASSERT(content.find("npm install -g serve") != std::string::npos, "Vite Dockerfile installs serve");
+        TEST_ASSERT(content.find("serve -s dist -l") != std::string::npos, "Vite Dockerfile serves dist directory");
+    }
+    std::filesystem::remove_all(testDirVite);
+
+    // Case 2: Standard Node App with start script
+    std::string testDirNode = "/tmp/df_test_node_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDirNode);
+    {
+        std::ofstream pkg(testDirNode + "/package.json");
+        pkg << R"({
+  "name": "express-api",
+  "scripts": {
+    "start": "node server.js"
+  }
+})";
+        pkg.close();
+    }
+    worker.prepareDockerfile(testDirNode);
+    TEST_ASSERT(std::filesystem::exists(testDirNode + "/Dockerfile"), "Dockerfile generated for Express app");
+    {
+        std::ifstream df(testDirNode + "/Dockerfile");
+        std::string content((std::istreambuf_iterator<char>(df)), std::istreambuf_iterator<char>());
+        TEST_ASSERT(content.find("CMD [\"npm\", \"start\"]") != std::string::npos, "Express Dockerfile uses npm start");
+    }
+    std::filesystem::remove_all(testDirNode);
+
+    // Case 3: Custom Dockerfile supplied by user
+    std::string testDirCustom = "/tmp/df_test_custom_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDirCustom);
+    {
+        std::ofstream df(testDirCustom + "/Dockerfile");
+        df << "FROM custom:base\nCMD [\"echo\", \"custom\"]\n";
+        df.close();
+    }
+    worker.prepareDockerfile(testDirCustom);
+    {
+        std::ifstream df(testDirCustom + "/Dockerfile");
+        std::string content((std::istreambuf_iterator<char>(df)), std::istreambuf_iterator<char>());
+        TEST_ASSERT(content.find("FROM custom:base") != std::string::npos, "User-supplied Dockerfile preserved without modification");
+    }
+    std::filesystem::remove_all(testDirCustom);
+}
+
 int main() {
     std::cout << "==================================================" << std::endl;
     std::cout << "  DeployForge C++ Worker Engine Test Suite       " << std::endl;
@@ -732,6 +806,7 @@ int main() {
     testJobValidationAndStartFailure();
     testInternalEnvFetch();
     testGoldenContracts();
+    testPrepareDockerfile();
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All C++ Worker tests passed! (" << g_passed << "/" << g_total << ")" << std::endl;

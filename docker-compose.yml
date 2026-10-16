@@ -48,6 +48,8 @@ services:
       dockerfile: backend/Dockerfile
     container_name: deployforge-api
     restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -90,6 +92,7 @@ services:
       dockerfile: Dockerfile
     container_name: deployforge-cpp-worker
     restart: unless-stopped
+    user: root
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -140,9 +143,11 @@ services:
 networks:
   # Internal control plane network (Database, Cache, API - inaccessible from outside)
   deployforge-control:
+    name: deployforge-control
     driver: bridge
   # Dedicated application network (Shared between Nginx and deployed apps for internal DNS routing)
   deployforge-apps:
+    name: deployforge-apps
     driver: bridge
 
 # ==============================================================================

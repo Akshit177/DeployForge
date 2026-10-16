@@ -25,6 +25,4 @@ ENV WORKSPACE_BASE_PATH=/var/lib/deployforge/workspaces
 ENV DOCKER_SOCK=/var/run/docker.sock
 ENV DOCKER_MODE=real
 
-USER deployforge
-
 CMD ["/app/deployforge-worker"]

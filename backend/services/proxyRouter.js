@@ -96,6 +96,7 @@ function getRoutingTable() {
  */
 async function syncFromDatabase() {
   try {
+    routingTable.clear();
     const result = await pool.query(
       `SELECT p.id AS project_id, p.name AS project_name, p.domain, p.port,
               d.id AS deployment_id, d.container_id, d.container_name, d.status AS deployment_status
@@ -123,7 +124,7 @@ async function syncFromDatabase() {
 
     try {
       const { syncNginxConfig } = require("./nginxManager.js");
-      syncNginxConfig().catch(() => {});
+      await syncNginxConfig();
     } catch (_) {}
 
     return getRoutingTable();

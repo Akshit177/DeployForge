@@ -22,15 +22,14 @@ public:
     std::map<std::string, std::string> fetchEnv(const std::string& deploymentId, int defaultPort = 3000);
 
     static bool validateJob(const DeploymentJob& job, std::string& errorReason);
+    void ensureWorkspaceAppFiles(const std::string& workspacePath, const DeploymentJob& job);
+    void prepareDockerfile(const std::string& workspacePath);
 
 private:
     Config m_cfg;
     RedisClient m_redis;
     DockerClient m_docker;
     std::atomic<bool> m_running{false};
-
-    void ensureWorkspaceAppFiles(const std::string& workspacePath, const DeploymentJob& job);
-    void prepareDockerfile(const std::string& workspacePath);
 };
 
 } // namespace deployforge

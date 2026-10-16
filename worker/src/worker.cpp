@@ -71,24 +71,111 @@ void WorkerDaemon::prepareDockerfile(const std::string& workspacePath) {
     }
 
     if (fs::exists(workspacePath + "/package.json")) {
+        bool hasStartScript = false;
+        bool hasBuildScript = false;
+        bool isFrontendOrSpa = false;
+
+        try {
+            std::ifstream pkgFile(workspacePath + "/package.json");
+            if (pkgFile.is_open()) {
+                nlohmann::json pkgJson;
+                pkgFile >> pkgJson;
+                if (pkgJson.contains("scripts") && pkgJson["scripts"].is_object()) {
+                    hasStartScript = pkgJson["scripts"].contains("start");
+                    hasBuildScript = pkgJson["scripts"].contains("build");
+                }
+
+                auto checkDependencies = [&](const std::string& field) {
+                    if (pkgJson.contains(field) && pkgJson[field].is_object()) {
+                        for (const auto& [dep, _] : pkgJson[field].items()) {
+                            if (dep == "vite" || dep == "react-scripts" || dep == "next" ||
+                                dep == "vue" || dep == "@vue/cli-service" || dep == "nuxt" ||
+                                dep == "astro" || dep == "svelte" || dep == "@sveltejs/kit" ||
+                                dep == "react" || dep == "react-dom") {
+                                isFrontendOrSpa = true;
+                            }
+                        }
+                    }
+                };
+
+                checkDependencies("dependencies");
+                checkDependencies("devDependencies");
+            }
+        } catch (...) {
+            // Fallback to default heuristics if JSON parse fails
+        }
+
         std::ofstream df(workspacePath + "/Dockerfile");
-        df << "FROM node:20-alpine\n"
-           << "WORKDIR /app\n"
-           << "RUN chown -R node:node /app\n"
-           << "USER node\n"
-           << "COPY --chown=node:node package*.json ./\n"
-           << "RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi\n"
-           << "COPY --chown=node:node . .\n"
-           << "ENV PORT=3000\n"
-           << "EXPOSE ${PORT}\n"
-           << "CMD [\"npm\", \"start\"]\n";
+
+        // Scenario 1: Frontend SPA without a start script, or static site build (e.g. Vite, React, Vue)
+        if ((!hasStartScript && (hasBuildScript || isFrontendOrSpa)) ||
+            (!hasStartScript && (fs::exists(workspacePath + "/vite.config.ts") || fs::exists(workspacePath + "/vite.config.js")))) {
+            df << "FROM node:20-alpine AS builder\n"
+               << "WORKDIR /app\n"
+               << "COPY package*.json ./\n"
+               << "RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi\n"
+               << "COPY . .\n";
+            if (hasBuildScript) {
+                df << "RUN npm run build\n";
+            }
+            df << "\nFROM node:20-alpine\n"
+               << "WORKDIR /app\n"
+               << "RUN npm install -g serve\n"
+               << "COPY --from=builder /app ./\n"
+               << "ENV PORT=3000\n"
+               << "EXPOSE ${PORT}\n"
+               << "CMD [\"sh\", \"-c\", \"if [ -d dist ]; then serve -s dist -l ${PORT:-3000}; elif [ -d build ]; then serve -s build -l ${PORT:-3000}; else serve -s . -l ${PORT:-3000}; fi\"]\n";
+        }
+        // Scenario 2: Node application with both build and start (e.g. Next.js, TypeScript Express)
+        else if (hasStartScript && hasBuildScript) {
+            df << "FROM node:20-alpine\n"
+               << "WORKDIR /app\n"
+               << "COPY package*.json ./\n"
+               << "RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi\n"
+               << "COPY . .\n"
+               << "RUN npm run build\n"
+               << "ENV PORT=3000\n"
+               << "EXPOSE ${PORT}\n"
+               << "CMD [\"npm\", \"start\"]\n";
+        }
+        // Scenario 3: Standard Node application with start script (e.g. Express)
+        else if (hasStartScript) {
+            df << "FROM node:20-alpine\n"
+               << "WORKDIR /app\n"
+               << "RUN chown -R node:node /app\n"
+               << "USER node\n"
+               << "COPY --chown=node:node package*.json ./\n"
+               << "RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi\n"
+               << "COPY --chown=node:node . .\n"
+               << "ENV PORT=3000\n"
+               << "EXPOSE ${PORT}\n"
+               << "CMD [\"npm\", \"start\"]\n";
+        }
+        // Scenario 4: Fallback for generic node script
+        else {
+            std::string entryPoint = "index.js";
+            if (fs::exists(workspacePath + "/server.js")) entryPoint = "server.js";
+            else if (fs::exists(workspacePath + "/app.js")) entryPoint = "app.js";
+
+            df << "FROM node:20-alpine\n"
+               << "WORKDIR /app\n"
+               << "COPY package*.json ./\n"
+               << "RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi\n"
+               << "COPY . .\n"
+               << "ENV PORT=3000\n"
+               << "EXPOSE ${PORT}\n"
+               << "CMD [\"node\", \"" << entryPoint << "\"]\n";
+        }
         df.close();
     } else {
         std::ofstream df(workspacePath + "/Dockerfile");
-        df << "FROM nginx:alpine\n"
-           << "COPY . /usr/share/nginx/html\n"
-           << "EXPOSE 80\n"
-           << "CMD [\"nginx\", \"-g\", \"daemon off;\"]\n";
+        df << "FROM node:20-alpine\n"
+           << "WORKDIR /app\n"
+           << "RUN npm install -g serve\n"
+           << "COPY . .\n"
+           << "ENV PORT=3000\n"
+           << "EXPOSE ${PORT}\n"
+           << "CMD [\"serve\", \"-s\", \".\", \"-l\", \"3000\"]\n";
         df.close();
     }
 }
@@ -138,7 +225,7 @@ bool WorkerDaemon::validateJob(const DeploymentJob& job, std::string& errorReaso
     }
 
     static const std::regex s_commitPattern(R"(^[0-9a-fA-F]{7,40}$)");
-    if (!job.commit_hash.empty() && job.commit_hash != "HEAD" && !std::regex_match(job.commit_hash, s_commitPattern)) {
+    if (!job.commit_hash.empty() && job.commit_hash != "HEAD" && job.commit_hash != job.branch && job.commit_hash != "main" && job.commit_hash != "master" && !std::regex_match(job.commit_hash, s_commitPattern)) {
         errorReason = "Invalid commit_hash: must be 'HEAD' or a 7-40 hex SHA";
         return false;
     }
@@ -328,7 +415,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
 
         workspacePath = ProcessRunner::getWorkspacePath(m_cfg.workspace_base_path, job.deployment_id);
 
-        std::string actualCommitHash = (!job.commit_hash.empty() && job.commit_hash != "HEAD") ? job.commit_hash : "";
+        bool isCustomSha = (!job.commit_hash.empty() && job.commit_hash != "HEAD" && job.commit_hash != job.branch && job.commit_hash != "main" && job.commit_hash != "master");
+        std::string actualCommitHash = isCustomSha ? job.commit_hash : "";
         std::string actualCommitMessage = (!job.commit_message.empty()) ? job.commit_message : "";
 
         if (!job.repo_url.empty() && (job.repo_url.rfind("http://", 0) == 0 || job.repo_url.rfind("https://", 0) == 0)) {
@@ -339,8 +427,8 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
                     throw std::runtime_error("Git clone failed: " + cloneRes.output);
                 }
             } else {
-                // If specific commit_hash requested and not HEAD
-                if (!job.commit_hash.empty() && job.commit_hash != "HEAD") {
+                // If specific commit_hash requested and not HEAD or branch name
+                if (isCustomSha) {
                     auto checkoutRes = ProcessRunner::executeCommand("git", {"checkout", job.commit_hash}, workspacePath, 30);
                     if (!checkoutRes.success()) {
                         auto fetchRes = ProcessRunner::executeCommand("git", {"fetch", "--depth", "1", "origin", job.commit_hash}, workspacePath, 30);

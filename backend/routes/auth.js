@@ -10,8 +10,8 @@ const router = express.Router();
 
 const cookieOptions = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
+    secure: process.env.COOKIE_SECURE === "true",
+    sameSite: "lax",
     maxAge: 15 * 60 * 1000,
 };
 
@@ -58,10 +58,12 @@ router.post("/register", async (req, res) => {
         );
         const user = result.rows[0];
         const sessionId = await createSession(user);
+        const token = generateAccessToken(user.id, sessionId);
 
-        res.cookie("token", generateAccessToken(user.id, sessionId), cookieOptions);
+        res.cookie("token", token, cookieOptions);
         return res.status(201).json({
             message: `Account created successfully for ${user.user_name}.`,
+            token,
             user: publicUser(user),
             session_id: sessionId,
         });
@@ -91,9 +93,11 @@ router.post("/login", async (req, res) => {
         }
 
         const sessionId = await createSession(user);
-        res.cookie("token", generateAccessToken(user.id, sessionId), cookieOptions);
+        const token = generateAccessToken(user.id, sessionId);
+        res.cookie("token", token, cookieOptions);
         return res.status(200).json({
             message: `Welcome back, ${user.user_name}.`,
+            token,
             user: publicUser(user),
             session_id: sessionId,
         });

@@ -57,6 +57,7 @@ export async function apiRequest(endpoint, options = {}) {
   }
 
   const config = {
+    credentials: options.credentials || 'include',
     ...options,
     headers,
   };
