@@ -36,8 +36,14 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
 
     req.on("timeout", () => {
       req.destroy();
-      // In real Docker mode, failure to reach container must report as unhealthy
-      if (getMode() === "real") {
+      const isSimFail =
+        host.includes("fail") ||
+        host.includes("unhealthy") ||
+        host.includes("crash") ||
+        host.includes("stopped");
+
+      // In real Docker mode or simulated failure, failure to reach container must report as unhealthy
+      if (getMode() === "real" || isSimFail) {
         return resolve({
           healthy: false,
           statusCode: 504,
@@ -50,7 +56,7 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
         });
       }
 
-      // In local simulator mode, return simulated healthy container response
+      // In local simulator mode for normal containers, return simulated healthy container response
       const latencyMs = Math.floor(Math.random() * 8) + 2;
       resolve({
         healthy: true,
@@ -64,8 +70,14 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
     });
 
     req.on("error", (err) => {
-      // In real Docker mode, network error must report as unhealthy
-      if (getMode() === "real") {
+      const isSimFail =
+        host.includes("fail") ||
+        host.includes("unhealthy") ||
+        host.includes("crash") ||
+        host.includes("stopped");
+
+      // In real Docker mode or simulated failure, network error must report as unhealthy
+      if (getMode() === "real" || isSimFail) {
         return resolve({
           healthy: false,
           statusCode: 502,
@@ -78,7 +90,7 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
         });
       }
 
-      // In local simulator mode, return simulated healthy container response
+      // In local simulator mode for normal containers, return simulated healthy container response
       const latencyMs = Math.floor(Math.random() * 8) + 2;
       resolve({
         healthy: true,
@@ -115,7 +127,34 @@ async function checkProjectHealth(projectId, userId) {
   const row = result.rows[0];
   const port = row.port || 3000;
   const containerTarget = row.container_name || (row.deployment_id ? `df-${row.deployment_id.replace(/-/g, "").slice(0, 12)}` : null);
-  const host = getMode() === "real" ? (containerTarget || "127.0.0.1") : "127.0.0.1";
+
+  const isStopped =
+    (row.project_status || "").toUpperCase() === "STOPPED" ||
+    (row.deployment_status || "").toUpperCase() === "STOPPED" ||
+    (row.project_status || "").toUpperCase() === "FAILED" ||
+    (row.deployment_status || "").toUpperCase() === "FAILED";
+
+  if (isStopped) {
+    return {
+      project_id: row.id,
+      project_name: row.name,
+      domain: row.domain,
+      port,
+      container_id: row.container_id || null,
+      container_name: containerTarget,
+      status: row.deployment_status || row.project_status || "STOPPED",
+      probe: {
+        healthy: false,
+        status_code: 503,
+        latency_ms: 0,
+        simulated: getMode() === "simulator",
+        error: "No active running deployment found: deployment is stopped or failed",
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
+
+  const host = containerTarget || "127.0.0.1";
   const probe = await probeContainerEndpoint({ host, port });
 
   return {

@@ -3,6 +3,9 @@
 #include "../include/logger.hpp"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #include <sstream>
 #include <stdexcept>
@@ -211,6 +214,9 @@ std::string DockerClient::createContainer(const CreateContainerParams& params) {
         if (params.container_name.find("fail") != std::string::npos || params.image_name.find("fail") != std::string::npos) {
             return "fail_sim_c_12345";
         }
+        if (params.container_name.find("crash") != std::string::npos || params.image_name.find("crash") != std::string::npos) {
+            return "crash_sim_c_12345";
+        }
         static std::mt19937_64 rng(42);
         std::stringstream ss;
         ss << "sim_c_" << std::hex << (rng() & 0xFFFFFFFFFFFFULL);
@@ -329,6 +335,92 @@ bool DockerClient::removeContainer(const std::string& containerId, bool force) {
     } catch (...) {
         return false;
     }
+}
+
+std::string DockerClient::getContainerLogs(const std::string& containerId, int tailLines) {
+    if (m_mode == "simulator") {
+        if (containerId.find("crash") != std::string::npos ||
+            containerId.find("fail") != std::string::npos ||
+            containerId.find("unhealthy") != std::string::npos) {
+            return "[Error: Cannot find module '/app/server.js']\n[Process exited with code 1]";
+        }
+        return "[Simulator] Mock container output: server started on port 3000";
+    }
+
+    auto res = ProcessRunner::executeCommand("docker", {"logs", "--tail", std::to_string(tailLines), containerId}, "", 10);
+    return res.output;
+}
+
+bool DockerClient::probeReadiness(const std::string& targetHost, int port, int maxAttempts, int intervalMs) {
+    if (m_mode == "simulator") {
+        if (targetHost.find("crash") != std::string::npos ||
+            targetHost.find("unhealthy") != std::string::npos ||
+            targetHost.find("fail") != std::string::npos) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        return true;
+    }
+
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        Logger::info("DockerClient", "Probing " + targetHost + ":" + std::to_string(port) +
+                     " (attempt " + std::to_string(attempt) + "/" + std::to_string(maxAttempts) + ")");
+
+        struct addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        std::string portStr = std::to_string(port);
+        int getAddrRes = getaddrinfo(targetHost.c_str(), portStr.c_str(), &hints, &res);
+        if (getAddrRes != 0 || !res) {
+            if (res) freeaddrinfo(res);
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+            continue;
+        }
+
+        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (sock < 0) {
+            freeaddrinfo(res);
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+            continue;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, res->ai_addr, res->ai_addrlen) == 0) {
+            std::string req = "GET / HTTP/1.1\r\nHost: " + targetHost + "\r\nConnection: close\r\n\r\n";
+            send(sock, req.c_str(), req.size(), 0);
+
+            char buf[256];
+            ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string header(buf);
+                size_t space1 = header.find(' ');
+                if (space1 != std::string::npos) {
+                    try {
+                        int code = std::stoi(header.substr(space1 + 1, 3));
+                        if (code > 0 && code < 500) {
+                            close(sock);
+                            freeaddrinfo(res);
+                            Logger::info("DockerClient", "Readiness probe succeeded with HTTP " + std::to_string(code));
+                            return true;
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+
+        close(sock);
+        freeaddrinfo(res);
+        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+    }
+
+    return false;
 }
 
 } // namespace deployforge

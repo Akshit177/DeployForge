@@ -428,5 +428,34 @@
 - **Verification result:** VERIFIED — 23/23 backend test suites passing (100%), 72/72 C++ tests passing, frontend Vite build clean.
 - **Anything deferred:** None.
 
-
-
+### F-14: Container DNS health probe and readiness probe in C++ worker
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Implemented container readiness probe in C++ worker engine (`worker/include/docker_client.hpp`, `worker/src/docker_client.cpp`):
+    - `probeReadiness(targetHost, port, maxAttempts, intervalMs)` probes TCP socket connection and HTTP GET `/` request (< 500 status code) up to `maxAttempts` with backoff interval. Rejects simulated failing/crash targets in simulator mode.
+    - `getContainerLogs(containerId, tailLines)` fetches the last N lines of container logs via `docker logs --tail` (or simulated crash logs in simulator mode).
+  - Integrated readiness probing into C++ worker lifecycle (`worker/src/worker.cpp`):
+    - After starting the container and inspecting network state, calls `probeReadiness(containerName, job.port, 30, 1000)` before marking the deployment `RUNNING`.
+    - If readiness probe fails or times out, collects container logs via `getContainerLogs`, emits a structured error message including the logs, and fails the deployment cleanly with `DEPLOYMENT_FAILED`.
+  - Fixed health check probing in backend API (`backend/services/healthCheck.js`):
+    - `checkProjectHealth`: Probes container via Docker DNS (`containerTarget = activeDeployment.container_name || ...`), replacing hardcoded `127.0.0.1`.
+    - Checks `isStopped` (`STOPPED` / `FAILED` status) and returns HTTP 503 `healthy: false` when a project's deployment is stopped/failed instead of returning false-positive `healthy: true`.
+    - `probeContainerEndpoint`: Rejects simulated probe targets when the host name indicates failure (`crash`, `fail`, `unhealthy`, `stopped`) rather than returning false-positive healthy.
+  - Added dedicated test suite `backend/tests/f14_health_probe.test.js` validating container name probing, stopped deployment 503 response, and failing host probe rejection.
+  - Added 9 new unit and integration test assertions in `worker/tests/test_runner.cpp` validating `probeReadiness`, `getContainerLogs`, and end-to-end deployment failure with container logs on probe timeout (81/81 C++ tests passing).
+  - Appended `tests/f14_health_probe.test.js` to `backend/package.json` `scripts.test`.
+- **Files touched:**
+  - `worker/include/docker_client.hpp`
+  - `worker/src/docker_client.cpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `backend/services/healthCheck.js`
+  - `backend/package.json`
+  - `backend/tests/f14_health_probe.test.js`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/f14_health_probe.test.js`: 3 tests (checkProjectHealth probes container_name instead of 127.0.0.1; stopped project returns healthy: false 503; probeContainerEndpoint on failing host returns healthy: false).
+  - `worker/tests/test_runner.cpp`: 9 new assertions in Suite 3 and Suite 6 verifying `probeReadiness` true/false, `getContainerLogs` content, and `processSingleJob` probe timeout handling with container log capture (81/81 C++ tests passing).
+- **Verification result:** VERIFIED — 81/81 C++ worker tests pass, 24/24 backend test suites pass (100%), frontend Vite build clean.
+- **Anything deferred:** None.

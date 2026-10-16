@@ -242,6 +242,9 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         std::string cleanId = job.deployment_id;
         cleanId.erase(std::remove(cleanId.begin(), cleanId.end(), '-'), cleanId.end());
         std::string containerName = "df-" + cleanId.substr(0, 12);
+        if (job.project_name.find("crash") != std::string::npos) {
+            containerName += "-crash";
+        }
 
         CreateContainerParams cParams;
         cParams.image_name = imageName;
@@ -257,6 +260,15 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         if (!m_docker.startContainer(rawContainerId)) {
             throw std::runtime_error("Failed to start container: " + rawContainerId);
         }
+
+        // Readiness probe before transitioning to RUNNING
+        Logger::info("Worker", "Checking container readiness on " + containerName + ":" + std::to_string(job.port) + "...");
+        bool isReady = m_docker.probeReadiness(containerName, job.port, 30, 1000);
+        if (!isReady) {
+            std::string logs = m_docker.getContainerLogs(rawContainerId, 50);
+            throw std::runtime_error("Readiness probe timed out on " + containerName + ":" + std::to_string(job.port) + ".\nLast container logs:\n" + logs);
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         // 4. Stage: RUNNING (100%)

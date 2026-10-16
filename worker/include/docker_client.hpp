@@ -43,6 +43,8 @@ public:
     ContainerInfo inspectContainer(const std::string& containerId);
     bool stopContainer(const std::string& containerId, int timeoutSeconds = 10);
     bool removeContainer(const std::string& containerId, bool force = true);
+    std::string getContainerLogs(const std::string& containerId, int tailLines = 50);
+    bool probeReadiness(const std::string& targetHost, int port, int maxAttempts = 30, int intervalMs = 1000);
 
     std::string getMode() const { return m_mode; }
     void setMode(const std::string& mode) { m_mode = mode; }

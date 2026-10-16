@@ -138,6 +138,12 @@ void testDockerClientSimulator() {
     TEST_ASSERT(docker.startContainer(cid), "Container started");
     TEST_ASSERT(!docker.startContainer("fail_sim_container"), "startContainer returns false on failure");
 
+    // F-14: Test readiness probe and container logs
+    TEST_ASSERT(docker.probeReadiness("df-normal-app", 3000), "probeReadiness returns true for healthy container");
+    TEST_ASSERT(!docker.probeReadiness("df-crash-app", 3000), "probeReadiness returns false for crash container");
+    TEST_ASSERT(!docker.getContainerLogs("c_normal_123", 50).empty(), "getContainerLogs returns output");
+    TEST_ASSERT(docker.getContainerLogs("c_crash_123", 50).find("Cannot find module") != std::string::npos, "getContainerLogs returns error logs for crash container");
+
     auto info = docker.inspectContainer(cid);
     TEST_ASSERT(info.running, "Container inspect reports running");
     TEST_ASSERT(info.ip_address == "172.20.0.42", "Container IP assigned");
@@ -342,6 +348,39 @@ void testJobValidationAndStartFailure() {
     startFailJob.project_name = "fail-app"; // triggers containerName with "fail" in simulator
     bool failResult = worker.processSingleJob(startFailJob);
     TEST_ASSERT(!failResult, "processSingleJob fails cleanly when container start fails");
+
+    // F-14: Test readiness probe timeout triggers DEPLOYMENT_FAILED with container logs
+    DeploymentJob crashJob = validJob;
+    crashJob.message_id = "msg-crash-003";
+    crashJob.deployment_id = "55555555-5555-5555-5555-555555555555";
+    crashJob.project_name = "crash-app";
+    bool crashResult = worker.processSingleJob(crashJob);
+    TEST_ASSERT(!crashResult, "processSingleJob fails cleanly when readiness probe fails");
+
+    auto* crashReply = static_cast<redisReply*>(
+        redisCommand(worker.getRedisClient().getContext(), "XREVRANGE stream:test_cpp_events + - COUNT 1")
+    );
+    std::string crashPayloadStr;
+    if (crashReply && crashReply->type == REDIS_REPLY_ARRAY && crashReply->elements > 0) {
+        auto* msg = crashReply->element[0];
+        if (msg->type == REDIS_REPLY_ARRAY && msg->elements >= 2) {
+            auto* fields = msg->element[1];
+            if (fields->type == REDIS_REPLY_ARRAY) {
+                for (size_t i = 0; i + 1 < fields->elements; i += 2) {
+                    std::string key = fields->element[i]->str ? fields->element[i]->str : "";
+                    std::string val = fields->element[i + 1]->str ? fields->element[i + 1]->str : "";
+                    if (key == "payload") crashPayloadStr = val;
+                }
+            }
+        }
+        freeReplyObject(crashReply);
+    }
+    TEST_ASSERT(!crashPayloadStr.empty(), "Worker emitted failure event payload on probe timeout");
+    nlohmann::json crashParsed = nlohmann::json::parse(crashPayloadStr);
+    TEST_ASSERT(crashParsed["status"] == "FAILED", "Emitted failure event has status FAILED");
+    std::string errMsg = crashParsed["error_message"].get<std::string>();
+    TEST_ASSERT(errMsg.find("Readiness probe timed out") != std::string::npos, "Error message specifies readiness probe timeout");
+    TEST_ASSERT(errMsg.find("Cannot find module") != std::string::npos, "Error message contains container logs");
 }
 
 int main() {
