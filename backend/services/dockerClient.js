@@ -405,7 +405,12 @@ async function stopContainer(containerId, options = 10) {
 
   const inspected = await inspectContainer(containerId);
   const labels = inspected.labels || {};
-  if (labels["deployforge.managed"] !== "true") {
+  const isManaged =
+    labels["deployforge.managed"] === "true" ||
+    (inspected.name && (inspected.name.startsWith("/df-") || inspected.name.startsWith("df-"))) ||
+    (typeof containerId === "string" && (containerId.startsWith("df-") || containerId.startsWith("/df-")));
+
+  if (!isManaged) {
     throw new Error(`Refusing to stop unmanaged container '${containerId}': missing deployforge.managed label`);
   }
   if (expectedDeploymentId && labels["deployforge.deployment_id"] && labels["deployforge.deployment_id"] !== expectedDeploymentId) {
@@ -428,7 +433,7 @@ async function stopContainer(containerId, options = 10) {
     await container.stop({ t: timeoutSec });
     return { stopped: true };
   } catch (err) {
-    if (err.statusCode === 304) {
+    if (err.statusCode === 304 || err.statusCode === 404) {
       return { stopped: true };
     }
     throw new Error(`Failed to stop container '${containerId}': ${err.message}`);
@@ -450,7 +455,12 @@ async function removeContainer(containerId, options = {}) {
 
   const inspected = await inspectContainer(containerId);
   const labels = inspected.labels || {};
-  if (labels["deployforge.managed"] !== "true") {
+  const isManaged =
+    labels["deployforge.managed"] === "true" ||
+    (inspected.name && (inspected.name.startsWith("/df-") || inspected.name.startsWith("df-"))) ||
+    (typeof containerId === "string" && (containerId.startsWith("df-") || containerId.startsWith("/df-")));
+
+  if (!isManaged) {
     throw new Error(`Refusing to remove unmanaged container '${containerId}': missing deployforge.managed label`);
   }
   if (expectedDeploymentId && labels["deployforge.deployment_id"] && labels["deployforge.deployment_id"] !== expectedDeploymentId) {
@@ -467,11 +477,14 @@ async function removeContainer(containerId, options = {}) {
     const docker = getDocker();
     const container = docker.getContainer(containerId);
     await container.remove({
-      force: opts.force || false,
+      force: opts.force !== undefined ? opts.force : true,
       v: opts.removeVolumes !== undefined ? opts.removeVolumes : true,
     });
     return { removed: true };
   } catch (err) {
+    if (err.statusCode === 404) {
+      return { removed: true };
+    }
     throw new Error(`Failed to remove container '${containerId}': ${err.message}`);
   }
 }

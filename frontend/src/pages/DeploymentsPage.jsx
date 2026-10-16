@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import FormMessage from "../components/common/FormMessage.jsx";
-import { fetchDeployments, triggerDeployment, cancelDeployment } from "../services/deploymentService.js";
+import { fetchDeployments, triggerDeployment, cancelDeployment, stopDeployment } from "../services/deploymentService.js";
 import {
   SearchIcon,
   CloseIcon,
@@ -242,6 +242,25 @@ export default function DeploymentsPage({ navigate, searchParams }) {
     }
   };
 
+  const handleStop = async (e, d) => {
+    e.stopPropagation();
+    if (actioningId === d.id) return;
+    if (!window.confirm(`Are you sure you want to shut down deployment #${d.num || d.id.slice(0, 7)}? The container will be stopped and removed.`)) {
+      return;
+    }
+    try {
+      setActioningId(d.id);
+      await stopDeployment(d.id);
+      setNotice(`Deployment #${d.num || d.id.slice(0, 7)} has been shut down.`);
+      setTimeout(() => setNotice(null), 3500);
+      loadData(true);
+    } catch (err) {
+      alert(`Could not shut down deployment: ${err.message}`);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   return (
     <div className="deployments-page reveal">
       {/* Page Header */}
@@ -361,6 +380,7 @@ export default function DeploymentsPage({ navigate, searchParams }) {
               const timeDisplay = timeAgo(d.created_at);
               const rawStatus = (d.status || d.state || "Queued").toLowerCase();
               const isActive = ["initiated", "queued", "cloning", "building", "starting", "deploying"].includes(rawStatus);
+              const isRunning = ["running", "succeeded", "live"].includes(rawStatus);
               const isActioning = actioningId === d.id;
 
               return (
@@ -446,6 +466,18 @@ export default function DeploymentsPage({ navigate, searchParams }) {
                       >
                         {isActioning ? <SpinnerIcon size={11} className="spin" aria-hidden="true" /> : <PauseIcon size={11} aria-hidden="true" />}
                         <span>Cancel</span>
+                      </button>
+                    ) : isRunning ? (
+                      <button
+                        type="button"
+                        className="btn-card-redeploy"
+                        onClick={(e) => handleStop(e, d)}
+                        disabled={isActioning}
+                        title="Stop container and shut down live deployment"
+                        aria-label={`Shut down deployment ${displayId}`}
+                      >
+                        {isActioning ? <SpinnerIcon size={11} className="spin" aria-hidden="true" /> : <PauseIcon size={11} aria-hidden="true" />}
+                        <span>Shut Down</span>
                       </button>
                     ) : (
                       <button

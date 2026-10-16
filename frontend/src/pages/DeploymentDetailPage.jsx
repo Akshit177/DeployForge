@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, memo } from "react";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import FormMessage from "../components/common/FormMessage.jsx";
-import { fetchDeployments, getDeployment, cancelDeployment } from "../services/deploymentService.js";
+import { fetchDeployments, getDeployment, cancelDeployment, stopDeployment } from "../services/deploymentService.js";
 import { fetchLogs, connectLogStream } from "../services/logService.js";
 import { verifyDomainHealth, resolveRoute } from "../services/routingService.js";
 import {
@@ -270,6 +270,23 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
     }
   };
 
+  const handleStop = async () => {
+    if (!deployment) return;
+    if (!window.confirm("Are you sure you want to shut down this deployment? The application container will be stopped and removed.")) {
+      return;
+    }
+    try {
+      setCancelling(true);
+      const updated = await stopDeployment(deployment.id);
+      setDeployment(updated);
+      loadDeploymentData(false);
+    } catch (err) {
+      alert(`Could not shut down deployment: ${err.message}`);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const status = (deployment?.status || deployment?.state || "Running").toLowerCase();
   const isRunning = status === "running" || status === "succeeded" || status === "live";
   const isFailed = status === "failed";
@@ -431,6 +448,19 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
               >
                 {cancelling ? <SpinnerIcon size={12} className="spin" /> : null}
                 <span>Cancel Build</span>
+              </button>
+            )}
+
+            {status === "running" && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                onClick={handleStop}
+                disabled={cancelling}
+                title="Stop container and shut down live deployment"
+              >
+                {cancelling ? <SpinnerIcon size={12} className="spin" /> : null}
+                <span>Shut Down</span>
               </button>
             )}
 

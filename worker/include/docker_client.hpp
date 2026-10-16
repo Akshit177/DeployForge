@@ -21,6 +21,7 @@ struct CreateContainerParams {
     std::vector<std::string> env;
     std::string network_name = "deployforge-apps";
     ContainerLimits limits;
+    std::map<std::string, std::string> labels;
 };
 
 struct ContainerInfo {

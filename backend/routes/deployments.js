@@ -440,16 +440,17 @@ router.post("/:id/cancel", async (req, res) => {
     );
 
     // Clean up container, route, and hot state on cancellation
-    if (current.container_id) {
-      stopContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
-      removeContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
+    const cCancelTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    if (cCancelTarget) {
+      await stopContainer(cCancelTarget, { expectedDeploymentId: current.id }).catch(() => {});
+      await removeContainer(cCancelTarget, { expectedDeploymentId: current.id }).catch(() => {});
     }
 
     const domainToUnregister = current.project_domain;
     if (domainToUnregister) {
-      unregisterUpstreamRoute(domainToUnregister);
+      unregisterUpstreamRoute(domainToUnregister, { projectId: current.project_id, deploymentId: current.id });
     }
-    deleteDeploymentHotState(current.id).catch(() => {});
+    await deleteDeploymentHotState(current.id).catch(() => {});
 
     await recordLog(
       current.id,
@@ -512,16 +513,17 @@ router.post("/:id/stop", async (req, res) => {
     );
 
     // Clean up container, route, and hot state on stop
-    if (current.container_id) {
-      stopContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
-      removeContainer(current.container_id, { expectedDeploymentId: current.id }).catch(() => {});
+    const cStopTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    if (cStopTarget) {
+      await stopContainer(cStopTarget, { expectedDeploymentId: current.id }).catch(() => {});
+      await removeContainer(cStopTarget, { expectedDeploymentId: current.id }).catch(() => {});
     }
 
     const domainToUnregister = current.project_domain;
     if (domainToUnregister) {
-      unregisterUpstreamRoute(domainToUnregister);
+      unregisterUpstreamRoute(domainToUnregister, { projectId: current.project_id, deploymentId: current.id });
     }
-    deleteDeploymentHotState(current.id).catch(() => {});
+    await deleteDeploymentHotState(current.id).catch(() => {});
 
     await recordLog(
       current.id,
@@ -539,6 +541,65 @@ router.post("/:id/stop", async (req, res) => {
   } catch (error) {
     console.error("Failed to stop deployment:", error);
     return res.status(500).json({ message: "Unable to stop deployment." });
+  }
+});
+
+// DELETE /api/deployments/:id - Delete a deployment record and cleanup container
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
+
+  if (!UUID_REGEX.test(id) && !/^\d+$/.test(id)) {
+    return res.status(400).json({ message: "Invalid deployment ID format." });
+  }
+
+  try {
+    const checkQuery = `
+      SELECT d.*, p.id AS project_id, p.domain AS project_domain, p.name AS project_name
+      FROM deployments d
+      JOIN projects p ON d.project_id = p.id
+      WHERE ${UUID_REGEX.test(id) ? "d.id = $1" : "d.deployment_number = $1"} AND d.user_id = $2
+    `;
+    const check = await pool.query(checkQuery, [id, req.user.id]);
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({ message: "Deployment not found." });
+    }
+
+    const current = check.rows[0];
+
+    // Clean up container, route, and hot state
+    const cTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    if (cTarget) {
+      await stopContainer(cTarget, { expectedDeploymentId: current.id }).catch(() => {});
+      await removeContainer(cTarget, { expectedDeploymentId: current.id }).catch(() => {});
+    }
+
+    // If this deployment was running, unregister its route
+    if (current.status === "RUNNING") {
+      const domainToUnregister = current.project_domain;
+      if (domainToUnregister) {
+        unregisterUpstreamRoute(domainToUnregister, { projectId: current.project_id, deploymentId: current.id });
+      }
+    }
+    await deleteDeploymentHotState(current.id).catch(() => {});
+
+    await pool.query(`DELETE FROM deployments WHERE id = $1`, [current.id]);
+
+    // Update project status based on remaining deployments
+    const remaining = await pool.query(
+      `SELECT status FROM deployments WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [current.project_id]
+    );
+    const newStatus = remaining.rows.length > 0 ? remaining.rows[0].status : "STOPPED";
+    await pool.query(`UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`, [newStatus, current.project_id]);
+
+    return res.status(200).json({
+      message: `Deployment #${current.deployment_number} has been deleted.`,
+      id: current.id,
+    });
+  } catch (error) {
+    console.error("Failed to delete deployment:", error);
+    return res.status(500).json({ message: "Unable to delete deployment." });
   }
 });
 

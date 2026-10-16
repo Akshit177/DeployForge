@@ -26,9 +26,21 @@ export async function cancelDeployment(id, options = {}) {
   return result.deployment;
 }
 
+export async function stopDeployment(id, options = {}) {
+  const result = await apiClient.post(`/api/deployments/${id}/stop`, null, options);
+  return result.deployment;
+}
+
+export async function deleteDeployment(id, options = {}) {
+  const result = await apiClient.delete(`/api/deployments/${id}`, options);
+  return result;
+}
+
 export default {
   fetchDeployments,
   getDeployment,
   triggerDeployment,
   cancelDeployment,
+  stopDeployment,
+  deleteDeployment,
 };

@@ -7,6 +7,9 @@ const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { encrypt } = require("../services/crypto.js");
 const { isValidRepoUrl, isValidBranch } = require("../utils/validators.js");
 const { buildPublicUrl } = require("../utils/publicUrl.js");
+const { stopContainer, removeContainer } = require("../services/dockerClient.js");
+const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
+const { deleteDeploymentHotState } = require("../services/hotState.js");
 
 const router = express.Router();
 
@@ -591,7 +594,7 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-// DELETE /api/projects/:id - Delete a project
+// DELETE /api/projects/:id - Delete a project and clean up its containers and routing
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
 
@@ -600,18 +603,49 @@ router.delete("/:id", async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
-      `DELETE FROM projects WHERE id = $1 AND user_id = $2 RETURNING id, name`,
-      [id, req.user.id]
-    );
+    // 1. Fetch project info and all its deployments before deletion
+    const projQuery = `
+      SELECT p.id, p.name, p.domain,
+             d.id AS deployment_id, d.container_id, d.container_name
+      FROM projects p
+      LEFT JOIN deployments d ON d.project_id = p.id
+      WHERE p.id = $1 AND p.user_id = $2
+    `;
+    const check = await pool.query(projQuery, [id, req.user.id]);
 
-    if (result.rows.length === 0) {
+    if (check.rows.length === 0) {
       return res.status(404).json({ message: "Project not found or already deleted." });
     }
 
+    const projectName = check.rows[0].name;
+    const projectDomain = check.rows[0].domain;
+
+    // 2. Tear down all containers for deployments under this project
+    for (const row of check.rows) {
+      const cTarget = row.container_id || row.container_name || (row.deployment_id ? `df-${row.deployment_id.replace(/-/g, "").slice(0, 12)}` : null);
+      if (cTarget) {
+        await stopContainer(cTarget, { expectedDeploymentId: row.deployment_id }).catch(() => {});
+        await removeContainer(cTarget, { expectedDeploymentId: row.deployment_id }).catch(() => {});
+      }
+      if (row.deployment_id) {
+        await deleteDeploymentHotState(row.deployment_id).catch(() => {});
+      }
+    }
+
+    // 3. Unregister routes from proxyRouter and sync Nginx
+    if (projectDomain) {
+      unregisterUpstreamRoute(projectDomain, { projectId: id, projectName });
+    }
+
+    // 4. Delete the project from PostgreSQL (cascades to deployments, env_vars, etc.)
+    await pool.query(
+      `DELETE FROM projects WHERE id = $1 AND user_id = $2`,
+      [id, req.user.id]
+    );
+
     return res.status(200).json({
-      message: `Project ${result.rows[0].name} deleted successfully.`,
-      id: result.rows[0].id,
+      message: `Project ${projectName} deleted successfully.`,
+      id: id,
     });
   } catch (error) {
     console.error("Failed to delete project:", error);

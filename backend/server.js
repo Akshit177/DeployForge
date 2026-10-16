@@ -54,10 +54,7 @@ app.use("/internal", internalRoutes);
 const defaultPublicDir = path.join(__dirname, "public");
 const fallbackDistPath = path.join(__dirname, "../frontend/dist");
 const publicDir = process.env.PUBLIC_DIR || (fs.existsSync(defaultPublicDir) ? defaultPublicDir : fallbackDistPath);
-
-if (fs.existsSync(publicDir)) {
-  app.use(express.static(publicDir));
-}
+const staticServe = fs.existsSync(publicDir) ? express.static(publicDir) : null;
 
 const http = require("http");
 const { getMode } = require("./services/dockerClient.js");
@@ -67,10 +64,35 @@ app.use(async (req, res, next) => {
     return next();
   }
 
+  const hostHeader = req.headers.host || "";
+  const hostNoPort = hostHeader.split(":")[0].toLowerCase();
+  const isPlatformHost =
+    !hostHeader ||
+    hostNoPort === "localhost" ||
+    hostNoPort === "127.0.0.1" ||
+    hostNoPort === "deployforge.app" ||
+    hostNoPort === "app.deployforge.app";
+
+  if (isPlatformHost) {
+    if (staticServe) {
+      return staticServe(req, res, (err) => {
+        if (err) return next(err);
+        if (path.extname(req.path)) {
+          return res.status(404).json({ message: "Asset not found" });
+        }
+        const indexPath = path.join(publicDir, "index.html");
+        if (fs.existsSync(indexPath)) {
+          return res.sendFile(indexPath);
+        }
+        return res.status(404).send("Not Found");
+      });
+    }
+    return next();
+  }
+
   // In host development or direct proxy mode, check if incoming Host matches an active project route
-  const hostHeader = req.headers.host;
   let route = resolveDomain(hostHeader);
-  if (!route && hostHeader && !hostHeader.startsWith("localhost:") && hostHeader !== "localhost" && !hostHeader.startsWith("127.0.0.1:") && hostHeader !== "127.0.0.1") {
+  if (!route && hostNoPort && hostNoPort !== "localhost" && hostNoPort !== "127.0.0.1") {
     await syncFromDatabase().catch(() => {});
     route = resolveDomain(hostHeader);
   }
@@ -185,16 +207,7 @@ app.use(async (req, res, next) => {
   }
 
   // If request is targeting a custom/project subdomain (e.g. logiclab.localhost) but no RUNNING route exists yet
-  const hostNoPort = (hostHeader || "").split(":")[0].toLowerCase();
-  const isPlatformHost =
-    !hostHeader ||
-    hostNoPort === "localhost" ||
-    hostNoPort === "127.0.0.1" ||
-    hostNoPort === "deployforge.app" ||
-    hostNoPort === "app.deployforge.app";
-
-  if (!isPlatformHost) {
-    try {
+  try {
       const subSlug = hostNoPort.replace(/\.(localhost|deployforge\.app|127\.0\.0\.1\.nip\.io)$/i, "");
       const projCheck = await pool.query(
         `SELECT p.name, p.status, p.domain, d.status AS deployment_status, d.error_message
@@ -208,6 +221,31 @@ app.use(async (req, res, next) => {
       if (projCheck.rows.length > 0) {
         const pRow = projCheck.rows[0];
         const currentStatus = (pRow.deployment_status || pRow.status || "QUEUED").toUpperCase();
+
+        if (currentStatus === "STOPPED" || currentStatus === "CANCELLED") {
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          return res.status(503).send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${pRow.name} - Deployment Shut Down</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #111827; border: 1px solid #374151; border-radius: 12px; padding: 2rem 2.5rem; max-width: 520px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
+    .badge { display: inline-block; padding: 4px 12px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; background: rgba(107,114,128,0.2); color: #9ca3af; border: 1px solid rgba(107,114,128,0.4); margin-bottom: 1rem; }
+    h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; }
+    p { color: #9ca3af; font-size: 0.875rem; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">● DEPLOYMENT SHUT DOWN</div>
+    <h1>${pRow.name} is stopped</h1>
+    <p>This deployment has been stopped or shut down. You can redeploy it from the DeployForge dashboard.</p>
+  </div>
+</body>
+</html>`);
+        }
 
         if (currentStatus === "FAILED") {
           res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -287,19 +325,6 @@ app.use(async (req, res, next) => {
   </div>
 </body>
 </html>`);
-  }
-
-  // Missing static asset files must return 404 instead of falling back to index.html
-  if (path.extname(req.path)) {
-    return res.status(404).json({ message: "Asset not found" });
-  }
-
-  const indexPath = path.join(publicDir, "index.html");
-  if (fs.existsSync(indexPath)) {
-    return res.sendFile(indexPath);
-  }
-
-  return res.status(404).send("Not Found");
 });
 
 const { startWorkerLoop } = require("./workers/deploymentWorker.js");

@@ -522,6 +522,10 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         for (const auto& kv : envVars) {
             cParams.env.push_back(kv.first + "=" + kv.second);
         }
+        cParams.labels["deployforge.managed"] = "true";
+        cParams.labels["deployforge.deployment_id"] = job.deployment_id;
+        cParams.labels["deployforge.project_id"] = job.project_id;
+        cParams.labels["deployforge.user_id"] = job.user_id;
 
         std::string rawContainerId = m_docker.createContainer(cParams);
         if (!m_docker.startContainer(rawContainerId)) {

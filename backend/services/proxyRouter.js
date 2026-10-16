@@ -41,11 +41,36 @@ function registerUpstreamRoute(domain, routeInfo) {
 }
 
 /**
- * Remove an upstream route when a deployment is stopped or cancelled
+ * Remove an upstream route when a deployment is stopped, cancelled, or deleted
  */
-function unregisterUpstreamRoute(domain) {
-  if (!domain) return false;
-  const deleted = routingTable.delete(domain.toLowerCase().trim());
+function unregisterUpstreamRoute(domain, options = {}) {
+  let deleted = false;
+  const opts = typeof options === "string" ? { projectId: options } : (options || {});
+
+  if (domain) {
+    const raw = domain.toLowerCase().trim();
+    const cleanDomain = raw.replace(/^https?:\/\//, "").split(":")[0];
+
+    if (routingTable.delete(raw)) deleted = true;
+    if (routingTable.delete(cleanDomain)) deleted = true;
+    if (routingTable.delete(`https://${cleanDomain}`)) deleted = true;
+    if (routingTable.delete(`http://${cleanDomain}`)) deleted = true;
+  }
+
+  // Also remove any entries matching projectId, deploymentId, projectName, or domain
+  for (const [key, entry] of routingTable.entries()) {
+    const matchProjId = opts.projectId && entry.project_id === opts.projectId;
+    const matchDepId = opts.deploymentId && entry.deployment_id === opts.deploymentId;
+    const matchProjName = opts.projectName && (entry.project_name || "").toLowerCase() === String(opts.projectName).toLowerCase();
+    const matchDomain = domain && (
+      entry.domain.toLowerCase().includes(domain.toLowerCase().trim().replace(/^https?:\/\//, "").split(":")[0])
+    );
+
+    if (matchProjId || matchDepId || matchProjName || matchDomain) {
+      routingTable.delete(key);
+      deleted = true;
+    }
+  }
 
   if (deleted) {
     try {

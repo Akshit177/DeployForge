@@ -240,6 +240,12 @@ std::string DockerClient::createContainer(const CreateContainerParams& params) {
 
     j["Env"] = params.env;
 
+    j["Labels"] = nlohmann::json::object();
+    j["Labels"]["deployforge.managed"] = "true";
+    for (const auto& [k, v] : params.labels) {
+        j["Labels"][k] = v;
+    }
+
     std::string resolvedNetwork = params.network_name;
     if (!resolvedNetwork.empty()) {
         try {
