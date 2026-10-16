@@ -366,11 +366,13 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
   const projectName = deployment?.projectName || deployment?.project || paramProjectName || "web-app";
   const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".localhost") || window.location.hostname.endsWith(".nip.io"));
   const projectDomain = deployment?.url || `${projectName}.deployforge.app`;
-  const safeSlug = (projectName || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
+  const domainPrefix = (deployment?.url || "").replace(/^https?:\/\//i, "").replace(/\.deployforge\.app.*$/i, "").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+  const safeSlug = domainPrefix || (projectName || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
   const localDomain = `${safeSlug}.localhost`;
   const hostPort = typeof window !== "undefined" ? window.location.port : "";
   const envIngressPort = typeof import.meta !== "undefined" && import.meta.env?.VITE_INGRESS_PORT;
-  const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" ? hostPort : "");
+  const isViteDevPort = hostPort.startsWith("517");
+  const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" && !isViteDevPort ? hostPort : "");
   const portSuffix = ingressPort ? `:${ingressPort}` : "";
   const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`);
   const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : projectDomain;
@@ -708,7 +710,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
                 </div>
                 {isLocalHost && (
                   <span style={{ fontSize: "0.75rem", color: "var(--text-tertiary)" }}>
-                    Local: <a href={`http://${localDomain}`} target="_blank" rel="noreferrer" style={{ color: "var(--text-secondary)" }}>{localDomain}</a>
+                    Local: <a href={`http://${localDomain}${portSuffix}`} target="_blank" rel="noreferrer" style={{ color: "var(--text-secondary)" }}>{localDomain}{portSuffix}</a>
                   </span>
                 )}
               </dd>

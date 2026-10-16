@@ -44,9 +44,92 @@ if (fs.existsSync(publicDir)) {
   app.use(express.static(publicDir));
 }
 
-app.use((req, res, next) => {
+const http = require("http");
+const { getMode } = require("./services/dockerClient.js");
+
+app.use(async (req, res, next) => {
   if (req.path.startsWith("/api/") || req.path.startsWith("/internal/")) {
     return next();
+  }
+
+  // In host development or direct proxy mode, check if incoming Host matches an active project route
+  const hostHeader = req.headers.host;
+  let route = resolveDomain(hostHeader);
+  if (!route && hostHeader && !hostHeader.startsWith("localhost:") && hostHeader !== "localhost" && !hostHeader.startsWith("127.0.0.1:") && hostHeader !== "127.0.0.1") {
+    await syncFromDatabase().catch(() => {});
+    route = resolveDomain(hostHeader);
+  }
+
+  if (route) {
+    if (getMode() === "simulator") {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(200).send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${route.project_name} - DeployForge</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 2rem 2.5rem; max-width: 480px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
+    .badge { display: inline-block; padding: 4px 12px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); margin-bottom: 1rem; }
+    h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; }
+    p { color: #9ca3af; font-size: 0.875rem; margin: 0 0 1.5rem 0; }
+    .meta { background: #030712; border: 1px solid #1f2937; border-radius: 8px; padding: 1rem; font-family: ui-monospace, monospace; font-size: 0.8rem; text-align: left; }
+    .meta-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
+    .meta-row:last-child { margin-bottom: 0; }
+    .meta-label { color: #6b7280; }
+    .meta-value { color: #e5e7eb; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">● RUNNING</div>
+    <h1>${route.project_name}</h1>
+    <p>Application successfully deployed and running on DeployForge</p>
+    <div class="meta">
+      <div class="meta-row"><span class="meta-label">Domain:</span><span class="meta-value">${hostHeader}</span></div>
+      <div class="meta-row"><span class="meta-label">Container:</span><span class="meta-value">${route.container_name || "df-container"}</span></div>
+      <div class="meta-row"><span class="meta-label">Internal Port:</span><span class="meta-value">:${route.port}</span></div>
+      <div class="meta-row"><span class="meta-label">Status:</span><span class="meta-value">200 OK</span></div>
+    </div>
+  </div>
+</body>
+</html>`);
+    }
+
+    const proxyTargetHost = route.target_host || "127.0.0.1";
+    const proxyTargetPort = route.port || 3000;
+    const proxyReq = http.request(
+      {
+        host: proxyTargetHost,
+        port: proxyTargetPort,
+        path: req.url,
+        method: req.method,
+        headers: {
+          ...req.headers,
+          host: hostHeader,
+          "x-forwarded-for": req.ip || req.socket.remoteAddress,
+          "x-forwarded-proto": req.protocol,
+          "x-real-ip": req.ip || req.socket.remoteAddress,
+        },
+        timeout: 10000,
+      },
+      (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+      }
+    );
+
+    proxyReq.on("error", (err) => {
+      console.warn(`[ProxyRouter] Upstream connection error for ${hostHeader}:`, err.message);
+      res.status(502).json({
+        message: `DeployForge upstream connection failed for ${hostHeader}`,
+        error: err.message,
+      });
+    });
+
+    req.pipe(proxyReq);
+    return;
   }
 
   // Missing static asset files must return 404 instead of falling back to index.html

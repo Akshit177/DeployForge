@@ -61,13 +61,22 @@ function unregisterUpstreamRoute(domain) {
  */
 function resolveDomain(domain) {
   if (!domain) return null;
-  const normalized = domain.toLowerCase().trim();
+  let normalized = domain.toLowerCase().trim().replace(/^https?:\/\//, "");
+  if (normalized.includes(":")) {
+    normalized = normalized.split(":")[0];
+  }
   const direct = routingTable.get(normalized);
   if (direct) return direct;
 
   for (const entry of routingTable.values()) {
     const slug = (entry.project_name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
-    if (normalized === `${slug}.localhost` || normalized === `${slug}.127.0.0.1.nip.io`) {
+    const domainPrefix = (entry.domain || "").replace(/^https?:\/\//, "").replace(/\.deployforge\.app$/i, "").toLowerCase();
+
+    if (
+      normalized === `${slug}.localhost` ||
+      normalized === `${slug}.127.0.0.1.nip.io` ||
+      (domainPrefix && (normalized === `${domainPrefix}.localhost` || normalized === `${domainPrefix}.127.0.0.1.nip.io`))
+    ) {
       return entry;
     }
   }
@@ -150,6 +159,7 @@ function generateNginxConfig() {
 
   for (const route of routes) {
     const safeProjectSlug = route.project_name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
+    const domainPrefix = (route.domain || "").replace(/^https?:\/\//, "").replace(/\.deployforge\.app$/i, "").toLowerCase();
     const safeProjectIdShort = String(route.project_id || "app").replace(/[^a-z0-9]/gi, "").slice(0, 12).toLowerCase();
     const safeUpstreamName = `upstream_df_${safeProjectIdShort}_${route.port}`;
 
@@ -158,13 +168,30 @@ function generateNginxConfig() {
       domainList.push(route.domain.toLowerCase().trim());
     }
     if (includeDevDomains) {
-      const devLocalhost = `${safeProjectSlug}.localhost`;
-      const devNipIo = `${safeProjectSlug}.127.0.0.1.nip.io`;
+      const primarySlug = domainPrefix || safeProjectSlug;
+      const devLocalhost = `${primarySlug}.localhost`;
+      const devNipIo = `${primarySlug}.127.0.0.1.nip.io`;
       if (!domainList.includes(devLocalhost)) {
         domainList.push(devLocalhost);
       }
       if (!domainList.includes(devNipIo)) {
         domainList.push(devNipIo);
+      }
+
+      if (domainPrefix && domainPrefix !== safeProjectSlug) {
+        const altLocalhost = `${safeProjectSlug}.localhost`;
+        const altNipIo = `${safeProjectSlug}.127.0.0.1.nip.io`;
+        const isSafeSlugTakenByOther = routes.some(
+          (r) => r !== route && ((r.domain || "").replace(/\.deployforge\.app$/i, "").toLowerCase() === safeProjectSlug)
+        );
+        if (!isSafeSlugTakenByOther) {
+          if (!domainList.includes(altLocalhost)) {
+            domainList.push(altLocalhost);
+          }
+          if (!domainList.includes(altNipIo)) {
+            domainList.push(altNipIo);
+          }
+        }
       }
     }
     const serverNames = domainList.map((d) => `    server_name ${d};\n`).join("");

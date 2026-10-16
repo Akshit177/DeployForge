@@ -18,6 +18,7 @@ const {
   registerUpstreamRoute,
   unregisterUpstreamRoute,
   generateNginxConfig,
+  resolveDomain,
 } = require("../services/proxyRouter.js");
 
 test.describe("R-01: Nginx Config Manager Hardening and Debouncing", () => {
@@ -162,6 +163,55 @@ test.describe("R-01: Nginx Config Manager Hardening and Debouncing", () => {
       );
     } finally {
       unregisterUpstreamRoute(testDomain);
+    }
+  });
+
+  test("Test 5: generateNginxConfig() & resolveDomain() handle multi-tenant domain collisions cleanly without duplicate server_names", () => {
+    const domain1 = "logiclab.deployforge.app";
+    const domain2 = "logiclab-2.deployforge.app";
+    const origDevDomains = process.env.DEV_DOMAINS;
+
+    try {
+      process.env.DEV_DOMAINS = "true";
+      registerUpstreamRoute(domain1, {
+        projectId: "proj-tenant-1",
+        projectName: "logiclab",
+        deploymentId: "dep-101",
+        port: 3000,
+      });
+      registerUpstreamRoute(domain2, {
+        projectId: "proj-tenant-2",
+        projectName: "logiclab",
+        deploymentId: "dep-102",
+        port: 3000,
+      });
+
+      const config = generateNginxConfig();
+      // Route 1 should have logiclab.localhost
+      assert.ok(config.includes("server_name logiclab.localhost;"), "Route 1 must have logiclab.localhost");
+      // Route 2 should have logiclab-2.localhost
+      assert.ok(config.includes("server_name logiclab-2.localhost;"), "Route 2 must have logiclab-2.localhost");
+
+      // Verify that server_name logiclab.localhost; appears exactly once (no duplicate collision)
+      const matches = config.match(/server_name logiclab\.localhost;/g);
+      assert.equal(matches.length, 1, "server_name logiclab.localhost; must appear exactly once to prevent Nginx collision");
+
+      // Verify resolveDomain with port and collision
+      const match1 = resolveDomain("logiclab.localhost:3000");
+      assert.ok(match1);
+      assert.equal(match1.project_id, "proj-tenant-1");
+
+      const match2 = resolveDomain("logiclab-2.localhost:8080");
+      assert.ok(match2);
+      assert.equal(match2.project_id, "proj-tenant-2");
+    } finally {
+      unregisterUpstreamRoute(domain1);
+      unregisterUpstreamRoute(domain2);
+      if (origDevDomains !== undefined) {
+        process.env.DEV_DOMAINS = origDevDomains;
+      } else {
+        delete process.env.DEV_DOMAINS;
+      }
     }
   });
 });

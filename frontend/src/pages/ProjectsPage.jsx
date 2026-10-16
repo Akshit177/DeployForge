@@ -378,11 +378,13 @@ export default function ProjectsPage({ navigate }) {
             const stageProgress = getStageProgress(state);
             const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".localhost") || window.location.hostname.endsWith(".nip.io"));
             const rawDomain = p.url || p.domain || `${p.name}.deployforge.app`;
-            const safeSlug = (p.name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
+            const domainPrefix = (p.domain || p.url || "").replace(/^https?:\/\//i, "").replace(/\.deployforge\.app.*$/i, "").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+            const safeSlug = domainPrefix || (p.name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "app";
             const localDomain = `${safeSlug}.localhost`;
             const hostPort = typeof window !== "undefined" ? window.location.port : "";
             const envIngressPort = typeof import.meta !== "undefined" && import.meta.env?.VITE_INGRESS_PORT;
-            const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" ? hostPort : "");
+            const isViteDevPort = hostPort.startsWith("517");
+            const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" && !isViteDevPort ? hostPort : "");
             const portSuffix = ingressPort ? `:${ingressPort}` : "";
             const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`);
             const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : rawDomain;
