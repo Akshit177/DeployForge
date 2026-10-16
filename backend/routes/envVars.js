@@ -7,6 +7,9 @@ const router = express.Router({ mergeParams: true });
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const BLOCKED_KEYS = new Set(["LD_PRELOAD", "LD_LIBRARY_PATH"]);
+const MAX_ENV_VARS_PER_PROJECT = 100;
+const MAX_VALUE_BYTES = 8192; // 8 KB
 
 function sanitizeKey(rawKey) {
   if (typeof rawKey !== "string") return "";
@@ -94,7 +97,7 @@ router.get("/", verifyProjectOwnership, async (req, res) => {
   }
 });
 
-// POST /api/projects/:id/env - Upsert one or more environment variables
+// POST /api/projects/:id/env - Atomically upsert one or more environment variables in a single transaction
 router.post("/", verifyProjectOwnership, async (req, res) => {
   const payload = req.body;
   const items = Array.isArray(payload)
@@ -107,74 +110,107 @@ router.post("/", verifyProjectOwnership, async (req, res) => {
     return res.status(400).json({ message: "No environment variables provided." });
   }
 
-  const upsertedVars = [];
+  // Pre-validate all items before beginning database work
+  const validatedItems = [];
+  for (const item of items) {
+    const rawKey = item.key;
+    const rawVal = item.value ?? "";
+    const key = sanitizeKey(rawKey);
 
+    if (!key || !KEY_REGEX.test(key)) {
+      return res.status(400).json({
+        message: `Invalid variable key "${rawKey}". Must start with a letter/underscore and contain only letters, numbers, or underscores.`,
+      });
+    }
+
+    if (BLOCKED_KEYS.has(key)) {
+      return res.status(400).json({
+        message: `Environment variable key "${key}" is reserved and not allowed.`,
+      });
+    }
+
+    const valStr = String(rawVal);
+    if (Buffer.byteLength(valStr, "utf8") > MAX_VALUE_BYTES) {
+      return res.status(400).json({
+        message: `Variable value for "${key}" exceeds maximum allowed size of 8 KB.`,
+      });
+    }
+
+    const isSecret = isLikelySecret(key, item.isSecret !== undefined ? item.isSecret : item.is_secret);
+    validatedItems.push({ key, valStr, isSecret });
+  }
+
+  const client = await pool.connect();
   try {
-    for (const item of items) {
-      const rawKey = item.key;
-      const rawVal = item.value ?? "";
-      const key = sanitizeKey(rawKey);
+    await client.query("BEGIN");
 
-      if (!key || !KEY_REGEX.test(key)) {
-        return res.status(400).json({
-          message: `Invalid variable key "${rawKey}". Must start with a letter/underscore and contain only letters, numbers, or underscores.`,
-        });
-      }
+    // Check project total variable limit
+    const existingRes = await client.query(
+      `SELECT key FROM project_env_vars WHERE project_id = $1`,
+      [req.project.id]
+    );
+    const existingKeys = new Set(existingRes.rows.map((r) => r.key));
 
-      const isSecret = isLikelySecret(key, item.isSecret !== undefined ? item.isSecret : item.is_secret);
-      const enc = encrypt(String(rawVal));
+    for (const v of validatedItems) {
+      existingKeys.add(v.key);
+    }
 
-      const query = `
-        INSERT INTO project_env_vars (
-          project_id, user_id, key, encrypted_value, iv, auth_tag, is_secret
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (project_id, key) DO UPDATE SET
-          encrypted_value = EXCLUDED.encrypted_value,
-          iv = EXCLUDED.iv,
-          auth_tag = EXCLUDED.auth_tag,
-          is_secret = EXCLUDED.is_secret,
-          updated_at = NOW()
-        RETURNING id, key, is_secret, created_at, updated_at
-      `;
+    if (existingKeys.size > MAX_ENV_VARS_PER_PROJECT) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: `Maximum limit of ${MAX_ENV_VARS_PER_PROJECT} environment variables per project exceeded.`,
+      });
+    }
 
-      const insertRes = await pool.query(query, [
+    const upsertedVars = [];
+    const query = `
+      INSERT INTO project_env_vars (
+        project_id, user_id, key, encrypted_value, iv, auth_tag, is_secret
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (project_id, key) DO UPDATE SET
+        encrypted_value = EXCLUDED.encrypted_value,
+        iv = EXCLUDED.iv,
+        auth_tag = EXCLUDED.auth_tag,
+        is_secret = EXCLUDED.is_secret,
+        updated_at = NOW()
+      RETURNING id, key, is_secret, created_at, updated_at
+    `;
+
+    for (const item of validatedItems) {
+      const enc = encrypt(item.valStr);
+      const insertRes = await client.query(query, [
         req.project.id,
         req.user.id,
-        key,
+        item.key,
         enc.ciphertext,
         enc.iv,
         enc.authTag,
-        isSecret,
+        item.isSecret,
       ]);
 
       const row = insertRes.rows[0];
       upsertedVars.push({
         id: row.id,
         key: row.key,
-        value: isSecret ? "••••••••••••••••" : String(rawVal),
+        value: item.isSecret ? "••••••••••••••••" : item.valStr,
         isSecret: row.is_secret,
         is_secret: row.is_secret,
         updated_at: row.updated_at,
       });
     }
 
-    // Sync project JSON field for backwards compatibility
-    const allVars = await pool.query(
-      `SELECT key, is_secret FROM project_env_vars WHERE project_id = $1`,
-      [req.project.id]
-    );
-    await pool.query(
-      `UPDATE projects SET env_vars = $1::jsonb, updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify(allVars.rows), req.project.id]
-    );
+    await client.query("COMMIT");
 
     return res.status(201).json({
       message: `Saved ${upsertedVars.length} environment variable(s) successfully.`,
       env_vars: upsertedVars,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Failed to save environment variables:", error);
     return res.status(500).json({ message: "Unable to store environment variables." });
+  } finally {
+    client.release();
   }
 });
 

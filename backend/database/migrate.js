@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const pool = require("../config/db.js");
+const { encrypt } = require("../services/crypto.js");
 
 async function runMigrations() {
   const schemaPath = path.join(__dirname, "schema.sql");
@@ -8,6 +9,38 @@ async function runMigrations() {
 
   console.log("Applying database schema migrations...");
   try {
+    const colCheck = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'projects' AND column_name = 'env_vars'
+    `);
+    if (colCheck.rows.length > 0) {
+      console.log("Backfilling plaintext environment variables into encrypted vault...");
+      const projectsWithVars = await pool.query(`
+        SELECT id, user_id, env_vars
+        FROM projects
+        WHERE env_vars IS NOT NULL AND jsonb_typeof(env_vars) = 'array'
+      `);
+      for (const row of projectsWithVars.rows) {
+        if (Array.isArray(row.env_vars)) {
+          for (const ev of row.env_vars) {
+            if (ev && ev.key && ev.value !== undefined && ev.value !== null && String(ev.value).trim() !== "") {
+              const enc = encrypt(String(ev.value));
+              const isSec = Boolean(ev.is_secret || ev.isSecret);
+              await pool.query(`
+                INSERT INTO project_env_vars (
+                  project_id, user_id, key, encrypted_value, iv, auth_tag, is_secret
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (project_id, key) DO NOTHING
+              `, [row.id, row.user_id, String(ev.key).trim().toUpperCase(), enc.ciphertext, enc.iv, enc.authTag, isSec]);
+            }
+          }
+        }
+      }
+      await pool.query(`ALTER TABLE projects DROP COLUMN IF EXISTS env_vars`);
+      console.log("Dropped projects.env_vars column.");
+    }
+
     await pool.query(sql);
     await pool.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS github_connected BOOLEAN DEFAULT false;

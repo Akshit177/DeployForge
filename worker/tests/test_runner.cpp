@@ -7,6 +7,11 @@
 #include <iostream>
 #include <cassert>
 #include <filesystem>
+#include <thread>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 using namespace deployforge;
@@ -33,6 +38,8 @@ void testConfig() {
     TEST_ASSERT(cfg.redis_port == 6379, "Default Redis port is 6379");
     TEST_ASSERT(cfg.redis_stream == "stream:deployments", "Default stream is stream:deployments");
     TEST_ASSERT(cfg.redis_group == "deployforge_workers", "Default group is deployforge_workers");
+    TEST_ASSERT(cfg.api_url == "http://127.0.0.1:3000", "Default API URL is http://127.0.0.1:3000");
+    TEST_ASSERT(cfg.internal_token == "deployforge-internal-dev-token", "Default internal token is set");
 }
 
 void testProcessRunner() {
@@ -383,6 +390,73 @@ void testJobValidationAndStartFailure() {
     TEST_ASSERT(errMsg.find("Cannot find module") != std::string::npos, "Error message contains container logs");
 }
 
+void testInternalEnvFetch() {
+    std::cout << "\n[Suite 7] S-06 Worker fetchEnv & Vault Integration" << std::endl;
+
+    // 1. Unreachable API host falls back cleanly to default PORT and NODE_ENV
+    Config cfg;
+    cfg.api_url = "http://127.0.0.1:49999";
+    WorkerDaemon worker(cfg);
+    auto fallbackEnv = worker.fetchEnv("00000000-0000-0000-0000-000000000000", 4000);
+    TEST_ASSERT(fallbackEnv["PORT"] == "4000", "fetchEnv fallback sets default port 4000");
+    TEST_ASSERT(fallbackEnv["NODE_ENV"] == "production", "fetchEnv fallback sets default NODE_ENV");
+
+    // 2. Real TCP HTTP round-trip against mock internal endpoint
+    int serverSock = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT(serverSock >= 0, "Created test socket for mock API server");
+
+    int opt = 1;
+    setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in servAddr;
+    std::memset(&servAddr, 0, sizeof(servAddr));
+    servAddr.sin_family = AF_INET;
+    servAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    servAddr.sin_port = 0; // OS assigns available ephemeral port
+
+    int bRes = bind(serverSock, (struct sockaddr*)&servAddr, sizeof(servAddr));
+    TEST_ASSERT(bRes == 0, "Bound mock API server socket");
+
+    socklen_t addrLen = sizeof(servAddr);
+    getsockname(serverSock, (struct sockaddr*)&servAddr, &addrLen);
+    int assignedPort = ntohs(servAddr.sin_port);
+    listen(serverSock, 1);
+
+    std::string capturedRequest;
+    std::thread mockApiServer([serverSock, &capturedRequest]() {
+        int clientSock = accept(serverSock, nullptr, nullptr);
+        if (clientSock >= 0) {
+            char buf[4096];
+            ssize_t n = read(clientSock, buf, sizeof(buf));
+            if (n > 0) {
+                capturedRequest.assign(buf, n);
+            }
+            std::string body = R"({"env":{"DATABASE_URL":"postgres://vault","API_KEY":"secret123","PORT":"8080","CUSTOM_FLAG":"true"}})";
+            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                               std::to_string(body.length()) + "\r\nConnection: close\r\n\r\n" + body;
+            write(clientSock, resp.c_str(), resp.length());
+            close(clientSock);
+        }
+        close(serverSock);
+    });
+
+    Config testCfg;
+    testCfg.api_url = "http://127.0.0.1:" + std::to_string(assignedPort);
+    testCfg.internal_token = "secret-token-s06";
+    WorkerDaemon testWorker(testCfg);
+
+    auto parsedEnv = testWorker.fetchEnv("12345678-1234-1234-1234-123456789abc", 3000);
+    mockApiServer.join();
+
+    TEST_ASSERT(capturedRequest.find("GET /internal/deployments/12345678-1234-1234-1234-123456789abc/env") != std::string::npos, "fetchEnv sends GET to /internal/deployments/:id/env");
+    TEST_ASSERT(capturedRequest.find("X-Internal-Token: secret-token-s06") != std::string::npos, "fetchEnv includes X-Internal-Token header");
+    TEST_ASSERT(parsedEnv["DATABASE_URL"] == "postgres://vault", "fetchEnv decodes DATABASE_URL from API payload");
+    TEST_ASSERT(parsedEnv["API_KEY"] == "secret123", "fetchEnv decodes API_KEY from API payload");
+    TEST_ASSERT(parsedEnv["PORT"] == "8080", "fetchEnv decodes PORT from API payload");
+    TEST_ASSERT(parsedEnv["CUSTOM_FLAG"] == "true", "fetchEnv decodes CUSTOM_FLAG from API payload");
+    TEST_ASSERT(parsedEnv["NODE_ENV"] == "production", "fetchEnv ensures default NODE_ENV present");
+}
+
 int main() {
     std::cout << "==================================================" << std::endl;
     std::cout << "  DeployForge C++ Worker Engine Test Suite       " << std::endl;
@@ -394,6 +468,7 @@ int main() {
     testRedisClient();
     testWorkerLifecycle();
     testJobValidationAndStartFailure();
+    testInternalEnvFetch();
 
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All C++ Worker tests passed! (" << g_passed << "/" << g_total << ")" << std::endl;

@@ -17,6 +17,7 @@ const deploymentRoutes = require("./routes/deployments.js");
 const logRoutes = require("./routes/logs.js");
 const settingsRoutes = require("./routes/settings.js");
 const routingRoutes = require("./routes/routing.js");
+const internalRoutes = require("./routes/internal.js");
 const { syncFromDatabase } = require("./services/proxyRouter.js");
 const app = express();
 
@@ -33,6 +34,7 @@ app.use("/api/deployments", deploymentRoutes);
 app.use("/api/logs", logRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/routing", routingRoutes);
+app.use("/internal", internalRoutes);
 
 const defaultPublicDir = path.join(__dirname, "public");
 const fallbackDistPath = path.join(__dirname, "../frontend/dist");
@@ -43,7 +45,7 @@ if (fs.existsSync(publicDir)) {
 }
 
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/")) {
+  if (req.path.startsWith("/api/") || req.path.startsWith("/internal/")) {
     return next();
   }
 

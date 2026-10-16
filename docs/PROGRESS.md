@@ -459,3 +459,52 @@
   - `worker/tests/test_runner.cpp`: 9 new assertions in Suite 3 and Suite 6 verifying `probeReadiness` true/false, `getContainerLogs` content, and `processSingleJob` probe timeout handling with container log capture (81/81 C++ tests passing).
 - **Verification result:** VERIFIED — 81/81 C++ worker tests pass, 24/24 backend test suites pass (100%), frontend Vite build clean.
 - **Anything deferred:** None.
+
+### S-06: Encrypted Environment Variables Vault & Internal Delivery
+- **Status:** DONE
+- **Evidence:** VERIFIED
+- **What changed:**
+  - Database schema & migration (`backend/database/schema.sql`, `backend/database/migrate.js`):
+    - Removed `env_vars` plaintext JSONB column from `projects` table in `schema.sql`.
+    - Added automated migration in `migrate.js` that checks for `projects.env_vars`, backfills any existing plaintext key/value variables into `project_env_vars` table using `encrypt()`, and drops the `env_vars` column.
+  - Internal API Endpoint (`backend/routes/internal.js`, `backend/server.js`):
+    - Created internal router mounted at `/internal` in `server.js` (isolated from public/client API routes and exempt from SPA index fallback).
+    - Added `GET /internal/deployments/:id/env` requiring `X-Internal-Token` header matching `INTERNAL_TOKEN` (returns 401 on missing or mismatched token).
+    - Looks up deployment's project, queries `project_env_vars`, decrypts secrets via `decrypt()`, filters out dangerous keys (`LD_PRELOAD`, `LD_LIBRARY_PATH`), and sets default `PORT` and `NODE_ENV`.
+  - Vault Endpoint Hardening & Projects Route (`backend/routes/envVars.js`, `backend/routes/projects.js`):
+    - Hardened `POST /api/projects/:id/env` to execute inside an atomic SQL transaction with batch validation and upsert.
+    - Enforced limits: capped at 100 variables per project, max 8 KB value length, and blocked reserved keys (`LD_PRELOAD`, `LD_LIBRARY_PATH`).
+    - Eliminated clobbering: removed code that previously overwrote `projects.env_vars` with key-only objects.
+    - Updated `formatProject` in `backend/routes/projects.js` to omit `env_vars`, preventing secret leakage.
+    - Updated `POST /api/projects` to encrypt and store any initial environment variables directly into `project_env_vars` within the project creation transaction.
+  - Node Deployment Worker Integration (`backend/workers/deploymentWorker.js`):
+    - Replaced query of dropped `projects.env_vars` with query to `project_env_vars` vault, decrypting secrets with `decrypt()` before injecting into `containerEnv` for `createContainer`.
+  - C++ Worker Engine Integration (`worker/include/config.hpp`, `worker/include/worker.hpp`, `worker/src/worker.cpp`):
+    - Added `api_url` and `internal_token` configuration fields with environment variable loading.
+    - Implemented `WorkerDaemon::fetchEnv(deploymentId, defaultPort)`: connects via POSIX TCP socket to API internal endpoint with `X-Internal-Token` header, parses JSON response, and populates container environment variables.
+    - Included graceful fallback to default `PORT` and `NODE_ENV` if API server is offline or unreachable.
+    - Wired `fetchEnv` into `WorkerDaemon::processSingleJob` before container creation.
+  - Test suites:
+    - Added `backend/tests/s06_env_vars.test.js`: 7 tests verifying `X-Internal-Token` auth, decrypted secrets delivery, dangerous key filtering, database column elimination, absence of plaintext secrets in projects API, transactional rollback on validation error, and initial project env encryption.
+    - Added Suite 7 (`testInternalEnvFetch`) in `worker/tests/test_runner.cpp`: verified fallback on offline API host, and real TCP HTTP round-trip against mock internal server testing token validation, JSON decoding, and map population (94/94 C++ tests passing).
+    - Appended `tests/s06_env_vars.test.js` to `backend/package.json` test script.
+- **Files touched:**
+  - `backend/database/schema.sql`
+  - `backend/database/migrate.js`
+  - `backend/routes/internal.js`
+  - `backend/routes/envVars.js`
+  - `backend/routes/projects.js`
+  - `backend/server.js`
+  - `backend/workers/deploymentWorker.js`
+  - `backend/package.json`
+  - `backend/tests/s06_env_vars.test.js`
+  - `worker/include/config.hpp`
+  - `worker/include/worker.hpp`
+  - `worker/src/worker.cpp`
+  - `worker/tests/test_runner.cpp`
+  - `docs/PROGRESS.md`
+- **Tests added / updated:**
+  - `backend/tests/s06_env_vars.test.js`: 7 tests covering internal auth, decrypted secrets, column elimination, leak prevention, batch transactions, and initial vault persistence.
+  - `worker/tests/test_runner.cpp`: Added Suite 7 covering worker internal env fetch over TCP with token header and JSON decoding (94/94 C++ tests passing).
+- **Verification result:** VERIFIED — 94/94 C++ worker tests pass, 25/25 backend test suites pass (100%), frontend Vite build clean.
+- **Anything deferred:** None.

@@ -11,6 +11,7 @@ const { registerUpstreamRoute } = require("../services/proxyRouter.js");
 const { setDeploymentHotState, deleteDeploymentHotState } = require("../services/hotState.js");
 const { publishDeploymentEvent } = require("../services/deploymentEvents.js");
 const { drainPersistenceEvents } = require("./persistenceWorker.js");
+const { decrypt } = require("../services/crypto.js");
 const {
   isDockerAvailable,
   buildImage,
@@ -85,7 +86,7 @@ async function processJob(jobData, messageId) {
   } = jobData;
 
   const depRes = await pool.query(
-    `SELECT d.*, p.name AS project_name, p.domain, p.port AS project_port, p.env_vars AS project_env_vars
+    `SELECT d.*, p.name AS project_name, p.domain, p.port AS project_port
      FROM deployments d
      JOIN projects p ON d.project_id = p.id
      WHERE d.id = $1`,
@@ -319,14 +320,24 @@ async function processJob(jobData, messageId) {
     const containerName = `df-${deployment_id.replace(/-/g, "").slice(0, 12)}`;
     const internalPort = runtimeInfo.detectedPort || configuredPort;
 
-    // Build container environment variables
+    // Build container environment variables from encrypted vault
     const containerEnv = {
       PORT: String(internalPort),
       NODE_ENV: "production",
     };
-    if (dep.project_env_vars && Array.isArray(dep.project_env_vars)) {
-      for (const ev of dep.project_env_vars) {
-        if (ev && ev.key) containerEnv[ev.key] = String(ev.value || "");
+    const vaultRes = await pool.query(
+      `SELECT key, encrypted_value, iv, auth_tag FROM project_env_vars WHERE project_id = $1 ORDER BY key ASC`,
+      [project_id]
+    );
+    const BLOCKED_KEYS = new Set(["LD_PRELOAD", "LD_LIBRARY_PATH"]);
+    for (const ev of vaultRes.rows) {
+      const upperKey = String(ev.key || "").trim().toUpperCase();
+      if (BLOCKED_KEYS.has(upperKey)) continue;
+      try {
+        const val = decrypt(ev.encrypted_value, ev.iv, ev.auth_tag);
+        containerEnv[upperKey] = val;
+      } catch (err) {
+        console.warn(`[Worker] Decryption failed for key ${upperKey}:`, err.message);
       }
     }
 

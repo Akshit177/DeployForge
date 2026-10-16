@@ -24,7 +24,6 @@ CREATE TABLE IF NOT EXISTS projects (
     runtime VARCHAR(50) DEFAULT 'node' NOT NULL,
     port INTEGER DEFAULT 3000 NOT NULL,
     auto_deploy BOOLEAN DEFAULT true NOT NULL,
-    env_vars JSONB DEFAULT '[]'::jsonb NOT NULL,
     status VARCHAR(50) DEFAULT 'QUEUED' NOT NULL,
     domain VARCHAR(255),
     latest_commit VARCHAR(40) DEFAULT 'HEAD',

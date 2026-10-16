@@ -4,6 +4,7 @@ const { authenticateToken } = require("../middleware/auth.js");
 const { parsePagination } = require("../middleware/pagination.js");
 const { publishDeploymentJob } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
+const { encrypt } = require("../services/crypto.js");
 
 const router = express.Router();
 
@@ -11,6 +12,8 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const ALLOWED_RUNTIMES = ["node", "python", "go", "docker", "static"];
 const GIT_REPO_REGEX = /^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?$/i;
 const BRANCH_REGEX = /^[A-Za-z0-9._/-]{1,100}$/;
+const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const BLOCKED_ENV_KEYS = new Set(["LD_PRELOAD", "LD_LIBRARY_PATH"]);
 const RESERVED_SLUGS = new Set([
   "api",
   "www",
@@ -102,7 +105,6 @@ function formatProject(p) {
     runtimeType: runtimeType,
     port: port,
     auto_deploy: Boolean(p.auto_deploy),
-    env_vars: Array.isArray(p.env_vars) ? p.env_vars : [],
     state: p.status || "Queued",
     status: p.status || "Queued",
     url: p.domain || `${p.name}.deployforge.app`,
@@ -237,8 +239,8 @@ router.post("/", async (req, res) => {
 
     const insertResult = await client.query(
       `INSERT INTO projects (
-        user_id, name, repository_url, branch, runtime, port, auto_deploy, env_vars, status, domain, latest_commit
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'INITIATED', $9, $10)
+        user_id, name, repository_url, branch, runtime, port, auto_deploy, status, domain, latest_commit
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'INITIATED', $8, $9)
       RETURNING *`,
       [
         req.user.id,
@@ -248,13 +250,51 @@ router.post("/", async (req, res) => {
         selectedRuntime,
         internalPort,
         isAutoDeploy,
-        JSON.stringify(varsToSave),
         domain,
         "main",
       ]
     );
 
     const newProject = insertResult.rows[0];
+
+    // Atomically encrypt and save any initial environment variables into the vault
+    if (Array.isArray(varsToSave) && varsToSave.length > 0) {
+      if (varsToSave.length > 100) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Maximum limit of 100 environment variables per project." });
+      }
+      for (const item of varsToSave) {
+        const rawKey = item.key;
+        const rawVal = item.value ?? "";
+        const key = String(rawKey || "").trim().toUpperCase();
+        if (!key || !ENV_KEY_REGEX.test(key)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Invalid variable key "${rawKey}".` });
+        }
+        if (BLOCKED_ENV_KEYS.has(key)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Environment variable key "${key}" is reserved and not allowed.` });
+        }
+        if (typeof rawVal === "string" && Buffer.byteLength(rawVal, "utf8") > 8192) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Variable value for "${key}" exceeds maximum allowed size of 8 KB.` });
+        }
+        const isSecret = Boolean(item.isSecret !== undefined ? item.isSecret : item.is_secret);
+        const enc = encrypt(String(rawVal));
+        await client.query(
+          `INSERT INTO project_env_vars (
+            project_id, user_id, key, encrypted_value, iv, auth_tag, is_secret
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (project_id, key) DO UPDATE SET
+            encrypted_value = EXCLUDED.encrypted_value,
+            iv = EXCLUDED.iv,
+            auth_tag = EXCLUDED.auth_tag,
+            is_secret = EXCLUDED.is_secret,
+            updated_at = NOW()`,
+          [newProject.id, req.user.id, key, enc.ciphertext, enc.iv, enc.authTag, isSecret]
+        );
+      }
+    }
 
     // Atomically create initial deployment with status INITIATED
     const initialDepRes = await client.query(
@@ -451,13 +491,6 @@ router.patch("/:id", async (req, res) => {
         ? Boolean(auto_deploy)
         : current.auto_deploy;
 
-    const varsSource =
-      envVars !== undefined
-        ? envVars
-        : env_vars !== undefined
-        ? env_vars
-        : current.env_vars;
-    const envVarsJson = typeof varsSource === "string" ? varsSource : JSON.stringify(varsSource || []);
     const newStatus = status !== undefined ? String(status).trim() : current.status;
 
     const updateResult = await client.query(
@@ -468,13 +501,51 @@ router.patch("/:id", async (req, res) => {
            runtime = $4,
            port = $5,
            auto_deploy = $6,
-           env_vars = $7::jsonb,
-           status = $8,
+           status = $7,
            updated_at = NOW()
-       WHERE id = $9 AND user_id = $10
+       WHERE id = $8 AND user_id = $9
        RETURNING *`,
-      [newName, newDomain, newBranch, newRuntime, newPort, newAutoDeploy, envVarsJson, newStatus, id, req.user.id]
+      [newName, newDomain, newBranch, newRuntime, newPort, newAutoDeploy, newStatus, id, req.user.id]
     );
+
+    const varsSource = envVars !== undefined ? envVars : env_vars;
+    if (Array.isArray(varsSource)) {
+      if (varsSource.length > 100) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Maximum limit of 100 environment variables per project." });
+      }
+      for (const item of varsSource) {
+        const rawKey = item.key;
+        const rawVal = item.value ?? "";
+        const key = String(rawKey || "").trim().toUpperCase();
+        if (!key || !ENV_KEY_REGEX.test(key)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Invalid variable key "${rawKey}".` });
+        }
+        if (BLOCKED_ENV_KEYS.has(key)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Environment variable key "${key}" is reserved and not allowed.` });
+        }
+        if (Buffer.byteLength(String(rawVal), "utf8") > 8192) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Variable value for "${key}" exceeds maximum allowed size of 8 KB.` });
+        }
+        const isSecret = Boolean(item.isSecret !== undefined ? item.isSecret : item.is_secret);
+        const enc = encrypt(String(rawVal));
+        await client.query(
+          `INSERT INTO project_env_vars (
+            project_id, user_id, key, encrypted_value, iv, auth_tag, is_secret
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (project_id, key) DO UPDATE SET
+            encrypted_value = EXCLUDED.encrypted_value,
+            iv = EXCLUDED.iv,
+            auth_tag = EXCLUDED.auth_tag,
+            is_secret = EXCLUDED.is_secret,
+            updated_at = NOW()`,
+          [id, req.user.id, key, enc.ciphertext, enc.iv, enc.authTag, isSecret]
+        );
+      }
+    }
 
     await client.query("COMMIT");
 

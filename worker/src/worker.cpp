@@ -5,6 +5,12 @@
 #include <thread>
 #include <chrono>
 #include <regex>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace deployforge {
 
@@ -132,6 +138,145 @@ bool WorkerDaemon::validateJob(const DeploymentJob& job, std::string& errorReaso
     return true;
 }
 
+std::map<std::string, std::string> WorkerDaemon::fetchEnv(const std::string& deploymentId, int defaultPort) {
+    std::map<std::string, std::string> envMap;
+    envMap["PORT"] = std::to_string(defaultPort);
+    envMap["NODE_ENV"] = "production";
+
+    if (m_cfg.api_url.empty()) {
+        return envMap;
+    }
+
+    std::string url = m_cfg.api_url;
+    if (url.rfind("http://", 0) == 0) {
+        url = url.substr(7);
+    } else if (url.rfind("https://", 0) == 0) {
+        url = url.substr(8);
+    }
+
+    size_t slashPos = url.find('/');
+    std::string hostPort = (slashPos != std::string::npos) ? url.substr(0, slashPos) : url;
+
+    std::string host = "127.0.0.1";
+    std::string portStr = "3000";
+    size_t colonPos = hostPort.find(':');
+    if (colonPos != std::string::npos) {
+        host = hostPort.substr(0, colonPos);
+        portStr = hostPort.substr(colonPos + 1);
+    } else {
+        host = hostPort;
+    }
+
+    struct addrinfo hints, *res = nullptr;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+        Logger::warn("Worker", "DNS resolution failed for API host " + host + ":" + portStr);
+        return envMap;
+    }
+
+    int sock = -1;
+    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sock < 0) continue;
+
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) {
+            break;
+        }
+        close(sock);
+        sock = -1;
+    }
+    freeaddrinfo(res);
+
+    if (sock < 0) {
+        Logger::warn("Worker", "Unable to connect to API server at " + host + ":" + portStr + " to fetch env for deployment " + deploymentId);
+        return envMap;
+    }
+
+    std::stringstream req;
+    req << "GET /internal/deployments/" << deploymentId << "/env HTTP/1.1\r\n"
+        << "Host: " << host << "\r\n"
+        << "User-Agent: DeployForge-CppWorker/1.0\r\n"
+        << "X-Internal-Token: " << m_cfg.internal_token << "\r\n"
+        << "Connection: close\r\n"
+        << "\r\n";
+
+    std::string reqStr = req.str();
+    ssize_t sent = write(sock, reqStr.c_str(), reqStr.length());
+    if (sent < 0) {
+        close(sock);
+        Logger::warn("Worker", "Failed to write HTTP request to API server");
+        return envMap;
+    }
+
+    std::string response;
+    char buffer[4096];
+    ssize_t bytesRead = 0;
+    while ((bytesRead = read(sock, buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, bytesRead);
+    }
+    close(sock);
+
+    if (response.rfind("HTTP/", 0) != 0) {
+        Logger::warn("Worker", "Malformed HTTP response from API server when fetching env");
+        return envMap;
+    }
+
+    size_t statusStart = response.find(' ');
+    if (statusStart == std::string::npos) return envMap;
+    int statusCode = 0;
+    try {
+        statusCode = std::stoi(response.substr(statusStart + 1, 3));
+    } catch (...) {
+        return envMap;
+    }
+
+    if (statusCode != 200) {
+        Logger::warn("Worker", "API server returned HTTP " + std::to_string(statusCode) + " when fetching env for deployment " + deploymentId);
+        return envMap;
+    }
+
+    size_t headerEnd = response.find("\r\n\r\n");
+    if (headerEnd == std::string::npos) return envMap;
+    std::string body = response.substr(headerEnd + 4);
+
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (j.contains("env") && j["env"].is_object()) {
+            for (auto it = j["env"].begin(); it != j["env"].end(); ++it) {
+                if (it.value().is_string()) {
+                    envMap[it.key()] = it.value().get<std::string>();
+                } else if (it.value().is_number()) {
+                    envMap[it.key()] = std::to_string(it.value().get<int64_t>());
+                } else if (it.value().is_boolean()) {
+                    envMap[it.key()] = it.value().get<bool>() ? "true" : "false";
+                } else {
+                    envMap[it.key()] = it.value().dump();
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Logger::warn("Worker", "Failed to parse env JSON from API server: " + std::string(e.what()));
+    }
+
+    if (envMap.find("PORT") == envMap.end()) {
+        envMap["PORT"] = std::to_string(defaultPort);
+    }
+    if (envMap.find("NODE_ENV") == envMap.end()) {
+        envMap["NODE_ENV"] = "production";
+    }
+
+    return envMap;
+}
+
 bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
     std::string errorReason;
     if (!validateJob(job, errorReason)) {
@@ -251,10 +396,10 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         cParams.container_name = containerName;
         cParams.container_port = job.port;
         cParams.network_name = m_cfg.app_network;
-        cParams.env = {
-            "PORT=" + std::to_string(job.port),
-            "NODE_ENV=production"
-        };
+        auto envVars = fetchEnv(job.deployment_id, job.port);
+        for (const auto& kv : envVars) {
+            cParams.env.push_back(kv.first + "=" + kv.second);
+        }
 
         std::string rawContainerId = m_docker.createContainer(cParams);
         if (!m_docker.startContainer(rawContainerId)) {

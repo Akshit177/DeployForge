@@ -22,6 +22,9 @@ struct Config {
     std::string worker_id = "worker-cpp-" + std::to_string(getpid());
     int poll_block_ms = 1500;
 
+    std::string api_url = "http://127.0.0.1:3000";
+    std::string internal_token = "deployforge-internal-dev-token";
+
     static Config loadFromEnv() {
         Config cfg;
 
@@ -45,6 +48,11 @@ struct Config {
         if (const char* v = std::getenv("APP_NETWORK")) cfg.app_network = v;
         if (const char* v = std::getenv("WORKER_ID")) cfg.worker_id = v;
         if (const char* v = std::getenv("POLL_BLOCK_MS")) cfg.poll_block_ms = std::stoi(v);
+
+        if (const char* v = std::getenv("DEPLOYFORGE_API_URL")) cfg.api_url = v;
+        else if (const char* v = std::getenv("API_URL")) cfg.api_url = v;
+
+        if (const char* v = std::getenv("INTERNAL_TOKEN")) cfg.internal_token = v;
 
         return cfg;
     }

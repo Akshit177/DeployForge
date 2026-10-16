@@ -5,6 +5,7 @@
 #include "docker_client.hpp"
 #include "process_runner.hpp"
 #include <atomic>
+#include <map>
 
 namespace deployforge {
 
@@ -18,6 +19,7 @@ public:
     void stop();
     bool processSingleJob(const DeploymentJob& job);
     RedisClient& getRedisClient() { return m_redis; }
+    std::map<std::string, std::string> fetchEnv(const std::string& deploymentId, int defaultPort = 3000);
 
     static bool validateJob(const DeploymentJob& job, std::string& errorReason);
 
