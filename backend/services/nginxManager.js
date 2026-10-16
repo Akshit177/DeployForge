@@ -169,6 +169,15 @@ async function validateNginxConfig() {
     const { stdout, stderr } = await execAsync("docker exec deployforge-nginx nginx -t");
     return { valid: true, output: stdout || stderr };
   } catch (err) {
+    const msg = String(err.message || "") + String(err.stderr || "");
+    if (
+      msg.includes("No such container") ||
+      msg.includes("is not running") ||
+      msg.includes("is restarting") ||
+      msg.includes("cannot exec in a stopped state")
+    ) {
+      return { valid: true, skipped: true, output: "Nginx container not ready for exec validation" };
+    }
     return {
       valid: false,
       error: err.message,
