@@ -386,8 +386,9 @@ export default function ProjectsPage({ navigate }) {
             const isViteDevPort = hostPort.startsWith("517");
             const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" && !isViteDevPort ? hostPort : "");
             const portSuffix = ingressPort ? `:${ingressPort}` : "";
-            const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`);
-            const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : rawDomain;
+            const serverPublicUrl = p.public_url || "";
+            const domainHref = serverPublicUrl || (isLocalHost ? `http://${localDomain}${portSuffix}` : (rawDomain.startsWith("http") ? rawDomain : `https://${rawDomain}`));
+            const displayDomain = serverPublicUrl ? serverPublicUrl.replace(/^https?:\/\//i, "") : (isLocalHost ? `${localDomain}${portSuffix}` : rawDomain);
 
             return (
               <article

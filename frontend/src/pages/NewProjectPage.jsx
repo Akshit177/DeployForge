@@ -309,8 +309,21 @@ export default function NewProjectPage({ navigate, searchParams }) {
     if (nameError) setNameError("");
   };
 
+  // Real ingress URL settings from the backend (PUBLIC_BASE_DOMAIN / PUBLIC_SCHEME / ingress port)
+  const [publicConfig, setPublicConfig] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/public-config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => { if (!cancelled && cfg && cfg.base_domain) setPublicConfig(cfg); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   const cleanSlug = projectName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "") || "my-app";
-  const publicUrl = `https://${cleanSlug}.deployforge.app`;
+  const publicUrl = publicConfig
+    ? `${publicConfig.scheme}://${cleanSlug}.${publicConfig.base_domain}${publicConfig.port_suffix || ""}`
+    : `http://${cleanSlug}.localhost`;
   const localUrl = `http://${cleanSlug}.localhost`;
   const nipIoUrl = `http://${cleanSlug}.127.0.0.1.nip.io`;
 

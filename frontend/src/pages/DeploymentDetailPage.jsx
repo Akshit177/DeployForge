@@ -374,8 +374,11 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
   const isViteDevPort = hostPort.startsWith("517");
   const ingressPort = envIngressPort || (hostPort && hostPort !== "80" && hostPort !== "443" && !isViteDevPort ? hostPort : "");
   const portSuffix = ingressPort ? `:${ingressPort}` : "";
-  const domainHref = isLocalHost ? `http://${localDomain}${portSuffix}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`);
-  const displayDomain = isLocalHost ? `${localDomain}${portSuffix}` : projectDomain;
+  // Backend is the single source of truth for the ingress URL (PUBLIC_BASE_DOMAIN / PUBLIC_SCHEME / ingress port).
+  // The browser-side guessing below is only a fallback for older API responses.
+  const serverPublicUrl = deployment?.public_url || "";
+  const domainHref = serverPublicUrl || (isLocalHost ? `http://${localDomain}${portSuffix}` : (projectDomain.startsWith("http") ? projectDomain : `https://${projectDomain}`));
+  const displayDomain = serverPublicUrl ? serverPublicUrl.replace(/^https?:\/\//i, "") : (isLocalHost ? `${localDomain}${portSuffix}` : projectDomain);
   const branchName = deployment?.branch || "main";
   const commitSha = deployment?.commit || deployment?.commit_hash?.slice(0, 7) || "HEAD";
   const containerId = deployment?.container_id || (isRunning ? `df-${deployment?.id?.slice(0, 12)}` : null);
@@ -708,7 +711,7 @@ export default function DeploymentDetailPage({ navigate, searchParams }) {
                     </span>
                   ) : null}
                 </div>
-                {isLocalHost && (
+                {!serverPublicUrl && isLocalHost && (
                   <span style={{ fontSize: "0.75rem", color: "var(--text-tertiary)" }}>
                     Local: <a href={`http://${localDomain}${portSuffix}`} target="_blank" rel="noreferrer" style={{ color: "var(--text-secondary)" }}>{localDomain}{portSuffix}</a>
                   </span>

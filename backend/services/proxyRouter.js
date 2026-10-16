@@ -1,4 +1,5 @@
 const pool = require("../config/db.js");
+const { getPublicBaseDomain } = require("../utils/publicUrl.js");
 
 // In-memory routing table: Map of domain -> upstream route configuration
 const routingTable = new Map();
@@ -67,12 +68,15 @@ function resolveDomain(domain) {
   }
   const direct = routingTable.get(normalized);
   if (direct) return direct;
+  const publicBase = getPublicBaseDomain();
 
   for (const entry of routingTable.values()) {
     const slug = (entry.project_name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
     const domainPrefix = (entry.domain || "").replace(/^https?:\/\//, "").replace(/\.deployforge\.app$/i, "").toLowerCase();
 
     if (
+      (publicBase !== "localhost" &&
+        (normalized === `${slug}.${publicBase}` || (domainPrefix && normalized === `${domainPrefix}.${publicBase}`))) ||
       normalized === `${slug}.localhost` ||
       normalized === `${slug}.127.0.0.1.nip.io` ||
       (domainPrefix && (normalized === `${domainPrefix}.localhost` || normalized === `${domainPrefix}.127.0.0.1.nip.io`))
@@ -193,6 +197,15 @@ function generateNginxConfig() {
             domainList.push(altNipIo);
           }
         }
+      }
+    }
+    // Public ingress hostname (PUBLIC_BASE_DOMAIN) - added regardless of DEV_DOMAINS so a
+    // VM / cloud deployment is reachable at the exact URL the dashboard shows.
+    const publicBase = getPublicBaseDomain();
+    if (publicBase !== "localhost") {
+      const publicHost = `${domainPrefix || safeProjectSlug}.${publicBase}`;
+      if (!domainList.includes(publicHost)) {
+        domainList.push(publicHost);
       }
     }
     const serverNames = domainList.map((d) => `    server_name ${d};\n`).join("");

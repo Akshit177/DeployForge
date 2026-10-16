@@ -6,6 +6,7 @@ const { publishDeploymentJob } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { encrypt } = require("../services/crypto.js");
 const { isValidRepoUrl, isValidBranch } = require("../utils/validators.js");
+const { buildPublicUrl } = require("../utils/publicUrl.js");
 
 const router = express.Router();
 
@@ -110,6 +111,7 @@ function formatProject(p) {
     status: p.status || "Queued",
     url: p.domain || `${p.name}.deployforge.app`,
     domain: p.domain || `${p.name}.deployforge.app`,
+    public_url: buildPublicUrl({ domain: p.domain, name: p.name }),
     commit: p.latest_commit || "HEAD",
     latest_commit: p.latest_commit || "HEAD",
     created_at: p.created_at,

@@ -9,6 +9,7 @@ const { getDeploymentHotState, setDeploymentHotState, deleteDeploymentHotState }
 const { stopContainer, removeContainer } = require("../services/dockerClient.js");
 const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
 const { canTransition, normalizeStatus } = require("../services/statusMachine.js");
+const { buildPublicUrl } = require("../utils/publicUrl.js");
 const {
   isValidBranch,
   isValidCommitHash,
@@ -80,6 +81,7 @@ function formatDeployment(d) {
     trigger: d.trigger || "manual",
     environment: d.environment || "production",
     url: d.url || d.project_domain || "",
+    public_url: buildPublicUrl({ domain: d.project_domain, name: d.project_name }),
     duration_seconds: d.duration_seconds || 0,
     duration: formatDuration(d.duration_seconds),
     serving: status === "RUNNING",

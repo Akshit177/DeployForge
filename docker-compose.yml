@@ -70,6 +70,10 @@ services:
       EXECUTION_ENGINE: ${EXECUTION_ENGINE:-cpp}
       ENABLE_NODE_DEPLOYMENT_WORKER: ${ENABLE_NODE_DEPLOYMENT_WORKER:-false}
       DEV_DOMAINS: ${DEV_DOMAINS:-true}
+      # Public ingress URL: deployed apps are shown/served at <slug>.<PUBLIC_BASE_DOMAIN>
+      PUBLIC_BASE_DOMAIN: ${PUBLIC_BASE_DOMAIN:-localhost}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-http}
+      PUBLIC_PORT: ${PUBLIC_PORT:-${INGRESS_PORT:-80}}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - workspaces_data:/var/lib/deployforge/workspaces

@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
+const { buildPublicUrl } = require("../utils/publicUrl.js");
 const { promisify } = require("util");
 const redis = require("../config/redis.js");
 const pool = require("../config/db.js");
@@ -412,7 +413,7 @@ async function processJob(jobData, messageId) {
       container_id: containerId,
       duration_seconds: durationSec,
       domain,
-      public_url: `https://${domain}`,
+      public_url: buildPublicUrl({ domain, name: projectName }),
       ...(actualCommitHash ? { commit_hash: actualCommitHash } : {}),
     });
 
@@ -472,7 +473,7 @@ async function processJob(jobData, messageId) {
       user_id,
       "INFO",
       "deploy",
-      `Deployment #${dep.deployment_number} is healthy · public URL active: https://${domain}`
+      `Deployment #${dep.deployment_number} is healthy · public URL active: ${buildPublicUrl({ domain, name: projectName })}`
     );
 
     await drainPersistenceEvents();

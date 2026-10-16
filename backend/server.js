@@ -35,6 +35,20 @@ app.use("/api/deployments", deploymentRoutes);
 app.use("/api/logs", logRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/routing", routingRoutes);
+
+// Non-secret ingress settings so the UI can preview the real URL before a project exists
+app.get("/api/public-config", (_req, res) => {
+  const {
+    getPublicBaseDomain,
+    getPublicScheme,
+    getPublicPortSuffix,
+  } = require("./utils/publicUrl.js");
+  res.json({
+    base_domain: getPublicBaseDomain(),
+    scheme: getPublicScheme(),
+    port_suffix: getPublicPortSuffix(),
+  });
+});
 app.use("/internal", internalRoutes);
 
 const defaultPublicDir = path.join(__dirname, "public");
