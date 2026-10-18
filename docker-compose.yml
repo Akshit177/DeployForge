@@ -62,6 +62,8 @@ services:
       REDIS_PORT: 6379
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
+      # Shared secret between the API and the C++ worker for /internal/* (decrypted env vars)
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN}
       CLIENT_URL: ${CLIENT_URL:-http://localhost}
       DOCKER_MODE: ${DOCKER_MODE:-real}
       APP_NETWORK: deployforge-apps
@@ -107,6 +109,10 @@ services:
       DOCKER_SOCK: /var/run/docker.sock
       WORKSPACE_BASE_PATH: /var/lib/deployforge/workspaces
       APP_NETWORK: deployforge-apps
+      # Without these the worker defaults to http://127.0.0.1:3000 (itself, inside its own
+      # container), so project env vars / secrets were never fetched and never injected.
+      DEPLOYFORGE_API_URL: http://api:3000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - workspaces_data:/var/lib/deployforge/workspaces

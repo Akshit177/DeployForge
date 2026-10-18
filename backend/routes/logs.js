@@ -1,9 +1,8 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const redis = require("../config/redis.js");
-const { authenticateToken, assertOwnsDeployment, assertOwnsProject } = require("../middleware/auth.js");
+const { authenticateToken, authenticateTokenOrQuery, assertOwnsDeployment, assertOwnsProject } = require("../middleware/auth.js");
 const { parsePagination } = require("../middleware/pagination.js");
-const { verifyAccessToken } = require("../services/auth.js");
 const {
   emitDeploymentLog,
   subscribeToDeploymentLogs,
@@ -43,32 +42,9 @@ function formatLogEntry(l) {
   };
 }
 
-// Custom auth helper that checks cookie OR query param token (crucial for SSE EventSource)
-async function authenticateSseOrCookie(req, res, next) {
-  const token = req.cookies?.token || req.query?.token;
-
-  if (!token) {
-    return res.status(401).json({ message: "Access denied. No authentication token provided." });
-  }
-
-  let decoded;
-  try {
-    decoded = verifyAccessToken(token);
-  } catch (error) {
-    return res.status(401).json({ message: "Invalid authentication token." });
-  }
-
-  try {
-    const userRes = await pool.query("SELECT * FROM users WHERE id = $1", [decoded.id]);
-    if (userRes.rows.length === 0) {
-      return res.status(404).json({ message: "User not found." });
-    }
-    req.user = userRes.rows[0];
-    return next();
-  } catch (err) {
-    return next(err);
-  }
-}
+// Shared authenticator: cookie, Bearer header or ?token= (EventSource cannot set headers).
+// Unlike the previous hand-rolled version it enforces Redis session revocation (logout) too.
+const authenticateSseOrCookie = authenticateTokenOrQuery;
 
 // GET /api/logs - Historical logs
 router.get("/", authenticateSseOrCookie, parsePagination, async (req, res) => {
@@ -96,7 +72,7 @@ router.get("/", authenticateSseOrCookie, parsePagination, async (req, res) => {
     }
 
     if (level && level !== "All") {
-      params.push(level.toUpperCase());
+      params.push(String(level).toUpperCase());
       whereClause += ` AND UPPER(l.level) = $${params.length}`;
     }
 

@@ -21,6 +21,7 @@ async function probeContainerEndpoint({ host = "127.0.0.1", port = 3000, path = 
         timeout: timeoutMs,
       },
       (res) => {
+        res.resume(); // discard the body so the socket is released
         const latencyMs = Date.now() - startTime;
         resolve({
           healthy: res.statusCode >= 200 && res.statusCode < 400,

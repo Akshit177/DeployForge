@@ -2,6 +2,7 @@ const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
 const { encrypt, decrypt } = require("../services/crypto.js");
+const { isLikelySecret } = require("../utils/validators.js");
 
 const router = express.Router({ mergeParams: true });
 
@@ -14,12 +15,6 @@ const MAX_VALUE_BYTES = 8192; // 8 KB
 function sanitizeKey(rawKey) {
   if (typeof rawKey !== "string") return "";
   return rawKey.trim().toUpperCase();
-}
-
-function isLikelySecret(key, isSecretParam) {
-  if (isSecretParam !== undefined) return Boolean(isSecretParam);
-  const secretKeywords = ["SECRET", "PASSWORD", "KEY", "TOKEN", "AUTH", "CREDENTIAL", "PRIVATE"];
-  return secretKeywords.some((kw) => key.includes(kw));
 }
 
 // All env routes require authenticated user
@@ -100,6 +95,9 @@ router.get("/", verifyProjectOwnership, async (req, res) => {
 // POST /api/projects/:id/env - Atomically upsert one or more environment variables in a single transaction
 router.post("/", verifyProjectOwnership, async (req, res) => {
   const payload = req.body;
+  if (!payload || typeof payload !== "object") {
+    return res.status(400).json({ message: "Request body must be a JSON object or array of variables." });
+  }
   const items = Array.isArray(payload)
     ? payload
     : Array.isArray(payload.variables)
@@ -113,6 +111,9 @@ router.post("/", verifyProjectOwnership, async (req, res) => {
   // Pre-validate all items before beginning database work
   const validatedItems = [];
   for (const item of items) {
+    if (!item || typeof item !== "object") {
+      return res.status(400).json({ message: "Each environment variable must be an object with a key and value." });
+    }
     const rawKey = item.key;
     const rawVal = item.value ?? "";
     const key = sanitizeKey(rawKey);

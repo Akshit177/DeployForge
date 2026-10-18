@@ -50,6 +50,15 @@ function validateEnv(env = process.env) {
       errors.push("DB_PASSWORD must not use the default 'postgres' in production");
     }
 
+    // 5. Internal control-plane token (guards /internal/* which returns decrypted env vars)
+    if (!env.INTERNAL_TOKEN) {
+      errors.push("INTERNAL_TOKEN must be set in production");
+    } else if (env.INTERNAL_TOKEN.length < 16) {
+      errors.push("INTERNAL_TOKEN must be at least 16 characters long in production");
+    } else if (env.INTERNAL_TOKEN === "deployforge-internal-dev-token") {
+      errors.push("INTERNAL_TOKEN must not use the known development default in production");
+    }
+
     if (errors.length > 0) {
       const msg = `[DeployForge FATAL] Production configuration validation failed:\n  - ${errors.join("\n  - ")}`;
       console.error(msg);

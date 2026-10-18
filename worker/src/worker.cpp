@@ -2,6 +2,7 @@
 #include "../include/logger.hpp"
 #include <fstream>
 #include <filesystem>
+#include <system_error>
 #include <thread>
 #include <chrono>
 #include <regex>
@@ -395,7 +396,15 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
 
     Logger::step("Worker", "Processing deployment " + job.deployment_id + " for project " + job.project_name);
     std::string workspacePath;
+    std::string createdContainerId; // set once a container exists, so failures can remove it
     auto startTime = std::chrono::steady_clock::now();
+
+    // The workspace is only needed until the image is built; it used to leak on disk forever.
+    auto cleanupWorkspaceDir = [&workspacePath]() {
+        if (workspacePath.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove_all(workspacePath, ec);
+    };
 
     try {
         // 1. Stage: CLONING (20%)
@@ -528,6 +537,7 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         cParams.labels["deployforge.user_id"] = job.user_id;
 
         std::string rawContainerId = m_docker.createContainer(cParams);
+        createdContainerId = rawContainerId;
         if (!m_docker.startContainer(rawContainerId)) {
             throw std::runtime_error("Failed to start container: " + rawContainerId);
         }
@@ -572,6 +582,7 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
 
         Logger::step("Worker", "Deployment " + job.deployment_id + " successfully RUNNING at " + publicUrl);
 
+        cleanupWorkspaceDir();
         m_redis.acknowledgeJob(m_cfg.redis_stream, m_cfg.redis_group, job.message_id);
         return true;
 
@@ -579,6 +590,13 @@ bool WorkerDaemon::processSingleJob(const DeploymentJob& job) {
         auto endTime = std::chrono::steady_clock::now();
         int durationSeconds = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count());
         Logger::error("Worker", "Deployment " + job.deployment_id + " failed: " + e.what());
+
+        // Do not leave a crashed / unready container (or the checkout) behind
+        if (!createdContainerId.empty()) {
+            m_docker.stopContainer(createdContainerId, 5);
+            m_docker.removeContainer(createdContainerId, true);
+        }
+        cleanupWorkspaceDir();
 
         m_redis.setHotState(
             job.deployment_id, job.project_id, "FAILED", "failed", 0,

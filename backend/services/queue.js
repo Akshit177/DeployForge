@@ -5,8 +5,8 @@ const CONSUMER_GROUP = "deployforge_workers";
 
 let isGroupCreated = false;
 
-async function ensureConsumerGroup() {
-  if (isGroupCreated) return;
+async function ensureConsumerGroup(force = false) {
+  if (isGroupCreated && !force) return;
   try {
     if (redis.status !== "ready" && redis.status !== "connecting") {
       await redis.connect().catch(() => {});

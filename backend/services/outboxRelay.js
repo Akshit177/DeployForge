@@ -116,7 +116,7 @@ async function relayPendingEvents() {
               if (payload.project_id) {
                 await client.query(
                   `UPDATE projects
-                   SET status = 'Failed', updated_at = NOW()
+                   SET status = 'FAILED', updated_at = NOW()
                    WHERE id = $1 AND status = 'INITIATED'`,
                   [payload.project_id]
                 );
@@ -206,7 +206,7 @@ async function reapStuckDeployments(thresholdMinutes = REAPER_STUCK_MINUTES) {
       if (dep.project_id) {
         await pool.query(
           `UPDATE projects
-           SET status = 'Failed', updated_at = NOW()
+           SET status = 'FAILED', updated_at = NOW()
            WHERE id = $1 AND status IN ('INITIATED', 'QUEUED')`,
           [dep.project_id]
         );

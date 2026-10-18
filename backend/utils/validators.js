@@ -72,7 +72,26 @@ function isValidEnvironment(rawEnv) {
   return IDENTIFIER_REGEX.test(rawEnv.trim());
 }
 
+/**
+ * Decide whether an env var should be stored/displayed as a secret. An explicit flag always wins;
+ * otherwise infer from the key name. Shared by every code path that writes env vars so that
+ * `DATABASE_PASSWORD` is masked no matter whether it was created with the project or afterwards.
+ */
+function isLikelySecret(key, explicitFlag) {
+  if (explicitFlag !== undefined && explicitFlag !== null) return Boolean(explicitFlag);
+  const upper = String(key || "").toUpperCase();
+  return ["SECRET", "PASSWORD", "KEY", "TOKEN", "AUTH", "CREDENTIAL", "PRIVATE"].some((kw) => upper.includes(kw));
+}
+
+/** Hostname / domain safe to embed into generated nginx config (no whitespace, `;`, `{}` ...). */
+const SAFE_HOST_REGEX = /^[a-z0-9]([a-z0-9._-]{0,251}[a-z0-9])?$/i;
+function isSafeHostname(value) {
+  return typeof value === "string" && SAFE_HOST_REGEX.test(value.trim());
+}
+
 module.exports = {
+  isLikelySecret,
+  isSafeHostname,
   isValidRepoUrl,
   isValidBranch,
   isValidCommitHash,

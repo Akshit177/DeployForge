@@ -9,8 +9,13 @@ let isGroupCreated = false;
 /**
  * Ensure Redis Stream and consumer group exist for persistence worker
  */
-async function ensurePersistenceGroup() {
-  if (isGroupCreated) return;
+/**
+ * @param {boolean} [force] re-check/recreate even if the group was created earlier in this
+ *   process (the group disappears when Redis loses its data, which otherwise leaves consumers
+ *   failing with NOGROUP forever).
+ */
+async function ensurePersistenceGroup(force = false) {
+  if (isGroupCreated && !force) return;
   try {
     if (redis.status !== "ready" && redis.status !== "connecting") {
       await redis.connect().catch(() => {});

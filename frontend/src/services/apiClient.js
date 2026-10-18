@@ -41,7 +41,10 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiRequest(endpoint, options = {}) {
+export async function apiRequest(endpoint, rawOptions = {}) {
+  // `skipAuthRedirect` is a client-side flag (e.g. a wrong password on /login is also a 401 but
+  // must not be treated as an expired session); it must not be forwarded to fetch().
+  const { skipAuthRedirect = false, ...options } = rawOptions;
   const token =
     (typeof window !== 'undefined' &&
       (localStorage.getItem('df_token') || localStorage.getItem('token'))) ||
@@ -86,7 +89,15 @@ export async function apiRequest(endpoint, options = {}) {
     payload = await response.text().catch(() => null);
   }
 
-  if (response.status === 401) {
+  // The API re-issues a fresh access token shortly before the current one expires (sliding
+  // session). The cookie is updated automatically; keep the Bearer fallback in sync as well.
+  const refreshedToken = response.headers.get('x-auth-token');
+  if (refreshedToken && typeof window !== 'undefined') {
+    localStorage.setItem('df_token', refreshedToken);
+    localStorage.setItem('token', refreshedToken);
+  }
+
+  if (response.status === 401 && !skipAuthRedirect) {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('df_token');
       localStorage.removeItem('token');

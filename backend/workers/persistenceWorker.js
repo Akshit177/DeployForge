@@ -16,6 +16,8 @@ const {
   normalizeStatus,
 } = require("../services/statusMachine.js");
 const { emitDeploymentLog } = require("../services/logEmitter.js");
+const { stopContainer, removeContainer, resolveContainerTarget } = require("../services/dockerClient.js");
+const { deleteDeploymentHotState } = require("../services/hotState.js");
 
 const CONSUMER_NAME = `persistence-${process.pid}`;
 let isLoopRunning = false;
@@ -40,6 +42,7 @@ const isValidUuid = (val) => typeof val === "string" && UUID_REGEX.test(val);
  * @param {object} payload
  */
 async function applyEventTransaction(client, eventType, payload) {
+  const superseded = []; // previously RUNNING deployments replaced by this event
   const {
     deployment_id,
     project_id,
@@ -142,6 +145,21 @@ async function applyEventTransaction(client, eventType, payload) {
           [cleanCommitHash, activeProjId]
         );
         const proj = projRes.rows[0];
+
+        // A new deployment going live supersedes the project's previous RUNNING deployments.
+        // Without this every redeploy leaked a running container and left a stale RUNNING row
+        // (which, after an API restart, could even win the routing table).
+        if (validDepId) {
+          const supersededRes = await client.query(
+            `UPDATE deployments
+             SET status = 'STOPPED', updated_at = NOW()
+             WHERE project_id = $1 AND id <> $2 AND UPPER(status) = 'RUNNING'
+             RETURNING id, container_id, container_name`,
+            [activeProjId, validDepId]
+          );
+          superseded.push(...supersededRes.rows);
+        }
+
         const routeDomain = domain || (proj && proj.domain);
         if (routeDomain) {
           const routePort = port || (proj && proj.port) || 3000;
@@ -182,12 +200,20 @@ async function applyEventTransaction(client, eventType, payload) {
       }
       if (activeProjId) {
         const projRes = await client.query(
-          `UPDATE projects SET status = 'FAILED', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          // A failed (re)deploy must not mark the project FAILED, or unroute it, while a previous
+          // deployment is still healthy and serving traffic.
+          `UPDATE projects
+           SET status = CASE
+                 WHEN EXISTS (SELECT 1 FROM deployments WHERE project_id = $1 AND UPPER(status) = 'RUNNING')
+                 THEN 'RUNNING' ELSE 'FAILED' END,
+               updated_at = NOW()
+           WHERE id = $1 RETURNING domain`,
           [activeProjId]
         );
         const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);
         if (unregDomain) {
-          unregisterUpstreamRoute(unregDomain);
+          // Only drop the route if it is actually served by the deployment that failed
+          unregisterUpstreamRoute(unregDomain, validDepId ? { deploymentId: validDepId } : {});
         }
       }
       break;
@@ -213,12 +239,17 @@ async function applyEventTransaction(client, eventType, payload) {
       }
       if (activeProjId) {
         const projRes = await client.query(
-          `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1 RETURNING domain`,
+          `UPDATE projects
+           SET status = CASE
+                 WHEN EXISTS (SELECT 1 FROM deployments WHERE project_id = $1 AND UPPER(status) = 'RUNNING')
+                 THEN 'RUNNING' ELSE 'STOPPED' END,
+               updated_at = NOW()
+           WHERE id = $1 RETURNING domain`,
           [activeProjId]
         );
         const unregDomain = domain || (projRes.rows[0] && projRes.rows[0].domain);
         if (unregDomain) {
-          unregisterUpstreamRoute(unregDomain);
+          unregisterUpstreamRoute(unregDomain, validDepId ? { deploymentId: validDepId } : {});
         }
       }
       break;
@@ -273,7 +304,7 @@ async function applyEventTransaction(client, eventType, payload) {
     }
   }
 
-  return { insertedLogs };
+  return { insertedLogs, superseded };
 }
 
 /**
@@ -339,7 +370,7 @@ async function processEvent(messageId, eventType, rawPayload, fullEntry = null) 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const { insertedLogs } = await applyEventTransaction(client, eventType, payload);
+    const { insertedLogs, superseded } = await applyEventTransaction(client, eventType, payload);
     await client.query("COMMIT");
 
     // ACK Redis event ONLY AFTER durable PostgreSQL transaction commits
@@ -355,6 +386,19 @@ async function processEvent(messageId, eventType, rawPayload, fullEntry = null) 
         } catch (_) {}
       } else {
         console.warn("XACK notice:", ackErr.message);
+      }
+    }
+
+    // Tear down superseded containers in the background (docker stop can take seconds)
+    if (superseded && superseded.length > 0) {
+      for (const old of superseded) {
+        const target = resolveContainerTarget({ ...old, deployment_id: old.id });
+        if (target) {
+          stopContainer(target, { expectedDeploymentId: old.id })
+            .then(() => removeContainer(target, { expectedDeploymentId: old.id }))
+            .catch(() => {});
+        }
+        deleteDeploymentHotState(old.id).catch(() => {});
       }
     }
 
@@ -402,6 +446,62 @@ async function processEvent(messageId, eventType, rawPayload, fullEntry = null) 
  * @param {number} [count]
  * @returns {Promise<number>} Processed event count
  */
+// Pending (delivered-but-never-ACKed) events are re-claimed after this idle time. Without this a
+// transient DB error, or a crash/restart (the consumer name embeds the pid) left the event in
+// the PEL forever and the deployment stuck in a non-terminal state.
+const RECLAIM_MIN_IDLE_MS = Number(process.env.PERSISTENCE_RECLAIM_IDLE_MS) || 30000;
+// After this many delivery attempts the event is moved to the DLQ instead of retried again.
+const MAX_DELIVERY_ATTEMPTS = Number(process.env.PERSISTENCE_MAX_DELIVERIES) || 5;
+
+async function reclaimStaleEvents(count = 10) {
+  let reply;
+  try {
+    reply = await redis.xautoclaim(
+      EVENTS_STREAM,
+      PERSISTENCE_GROUP,
+      CONSUMER_NAME,
+      RECLAIM_MIN_IDLE_MS,
+      "0-0",
+      "COUNT",
+      String(count)
+    );
+  } catch (err) {
+    if (err.message && err.message.includes("NOGROUP")) throw err;
+    return 0; // e.g. Redis < 6.2 without XAUTOCLAIM: skip silently
+  }
+
+  const claimed = Array.isArray(reply) && Array.isArray(reply[1]) ? reply[1] : [];
+  let processed = 0;
+
+  for (const item of claimed) {
+    const [messageId, fieldsArray] = item;
+    if (!fieldsArray) {
+      // Entry was trimmed from the stream; nothing left to process
+      await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId).catch(() => {});
+      continue;
+    }
+
+    const entry = parseStreamEntry(fieldsArray);
+
+    let deliveries = 0;
+    try {
+      const pending = await redis.xpending(EVENTS_STREAM, PERSISTENCE_GROUP, messageId, messageId, 1);
+      deliveries = Number(pending?.[0]?.[3]) || 0;
+    } catch (_) {}
+
+    if (deliveries > MAX_DELIVERY_ATTEMPTS) {
+      console.error(`[Persistence Worker] Event ${messageId} failed ${deliveries} times; routing to DLQ.`);
+      await routeToDlq(messageId, entry.event_type, entry, `Exceeded ${MAX_DELIVERY_ATTEMPTS} delivery attempts`);
+      await redis.xack(EVENTS_STREAM, PERSISTENCE_GROUP, messageId).catch(() => {});
+      continue;
+    }
+
+    if (await processEvent(messageId, entry.event_type, entry.payload, entry)) processed++;
+  }
+
+  return processed;
+}
+
 async function pollPersistenceEvents(count = 10) {
   await ensurePersistenceGroup();
 
@@ -435,9 +535,15 @@ async function pollPersistenceEvents(count = 10) {
       }
     }
 
+    // 2. Retry events that were delivered earlier but never ACKed
+    processedTotal += await reclaimStaleEvents(count);
+
     return processedTotal;
   } catch (error) {
-    if (!error.message.includes("NOGROUP")) {
+    if (error.message && error.message.includes("NOGROUP")) {
+      // The group vanished (Redis lost its data): recreate it instead of failing forever
+      await ensurePersistenceGroup(true).catch(() => {});
+    } else {
       console.warn("Persistence worker polling error:", error.message);
     }
     return 0;

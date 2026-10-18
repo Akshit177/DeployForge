@@ -41,7 +41,21 @@ function verifyAccessToken(token) {
     });
 }
 
+/**
+ * Cookie options for the auth token. Kept in one place so login, register,
+ * logout and the sliding-refresh logic in the auth middleware all agree.
+ */
+function getCookieOptions() {
+    return {
+        httpOnly: true,
+        secure: process.env.COOKIE_SECURE === "true",
+        sameSite: "lax",
+        maxAge: 15 * 60 * 1000,
+    };
+}
+
 module.exports = {
     generateAccessToken,
     verifyAccessToken,
+    getCookieOptions,
 };

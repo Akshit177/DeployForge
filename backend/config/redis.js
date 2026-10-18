@@ -12,12 +12,14 @@ const redis = new Redis({
   password: process.env.REDIS_PASSWORD || undefined,
   lazyConnect: true,
   maxRetriesPerRequest: 3,
+  // Never give up permanently: a Redis restart longer than a few seconds used to leave the
+  // client in the terminal "end" state until the whole API was restarted. Keep retrying with
+  // a capped backoff (callers already degrade gracefully while Redis is unavailable).
   retryStrategy(times) {
-    if (times > 5) {
-      console.warn("Redis connection retry limit reached. Continuing in fallback mode.");
-      return null;
+    if (times === 6) {
+      console.warn("Redis still unreachable after 5 retries. Continuing in fallback mode and retrying in the background.");
     }
-    return Math.min(times * 200, 2000);
+    return Math.min(times * 200, 5000);
   },
 });
 

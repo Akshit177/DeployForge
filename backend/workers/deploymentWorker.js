@@ -72,6 +72,32 @@ async function recordWorkerLog(deploymentId, projectId, userId, level, source, m
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Raised when a deployment is cancelled/stopped/deleted while its job is still in flight. */
+class JobCancelledError extends Error {}
+
+/**
+ * The API can cancel a deployment while this worker is mid-pipeline. Without re-checking, the
+ * worker kept going, overwrote CANCELLED with BUILDING/RUNNING and re-registered the route,
+ * silently undoing the user's cancel (and leaving an orphaned container).
+ */
+async function assertNotCancelled(deploymentId) {
+  const res = await pool.query("SELECT status FROM deployments WHERE id = $1", [deploymentId]);
+  if (res.rows.length === 0) {
+    throw new JobCancelledError("Deployment was deleted while in progress");
+  }
+  const status = String(res.rows[0].status || "").toUpperCase();
+  if (status === "CANCELLED" || status === "STOPPED") {
+    throw new JobCancelledError(`Deployment was ${status.toLowerCase()} while in progress`);
+  }
+}
+
+/** Best-effort removal of a container this job created (failed probe, cancellation, ...). */
+async function teardownCreatedContainer(containerResult, deploymentId) {
+  if (!containerResult || !containerResult.containerId) return;
+  await stopContainer(containerResult.containerId, { timeoutSec: 5, expectedDeploymentId: deploymentId }).catch(() => {});
+  await removeContainer(containerResult.containerId, { expectedDeploymentId: deploymentId }).catch(() => {});
+}
+
 async function processJob(jobData, messageId) {
   const {
     deployment_id,
@@ -93,7 +119,13 @@ async function processJob(jobData, messageId) {
      WHERE d.id = $1`,
     [deployment_id]
   );
-  if (depRes.rows.length === 0) return;
+  if (depRes.rows.length === 0) {
+    // Deployment (or its project) was deleted while queued: nothing to do, drop the job
+    try {
+      await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
+    } catch (_) {}
+    return;
+  }
   const dep = depRes.rows[0];
 
   const domain = dep.domain || jobDomain || "";
@@ -102,7 +134,7 @@ async function processJob(jobData, messageId) {
 
   // Idempotency check: if already RUNNING or CANCELLED, acknowledge and skip
   const currentStatus = (dep.status || "").toUpperCase();
-  if (currentStatus === "RUNNING" || currentStatus === "CANCELLED" || currentStatus === "FAILED") {
+  if (currentStatus === "RUNNING" || currentStatus === "CANCELLED" || currentStatus === "FAILED" || currentStatus === "STOPPED") {
     try {
       await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
     } catch (_) {}
@@ -263,6 +295,8 @@ async function processJob(jobData, messageId) {
       commit_message: actualCommitMessage,
     });
 
+    await assertNotCancelled(deployment_id);
+
     await pool.query(
       `UPDATE deployments
        SET status = 'BUILDING',
@@ -364,6 +398,8 @@ async function processJob(jobData, messageId) {
       `Creating and starting isolated container '${containerName}' on internal port :${internalPort} (network: deployforge-apps)`
     );
 
+    await assertNotCancelled(deployment_id);
+
     containerResult = await createContainer({
       imageName,
       containerName,
@@ -396,7 +432,8 @@ async function processJob(jobData, messageId) {
     await drainPersistenceEvents();
     await sleep(200);
 
-    // 4. Transition to RUNNING
+    // 4. Transition to RUNNING (unless the user cancelled/stopped it while it was starting)
+    await assertNotCancelled(deployment_id);
     const rawCid = containerResult.containerId || `sim_c_${deployment_id.replace(/-/g, "").slice(0, 12)}`;
     const containerId = rawCid.startsWith("c_")
       ? rawCid
@@ -442,7 +479,7 @@ async function processJob(jobData, messageId) {
            commit_hash = COALESCE($4, commit_hash),
            commit_message = COALESCE($5, commit_message),
            updated_at = NOW()
-       WHERE id = $6`,
+       WHERE id = $6 AND status NOT IN ('CANCELLED', 'STOPPED')`,
       [durationSec, containerId, containerName, actualCommitHash, actualCommitMessage, deployment_id]
     );
     await pool.query(
@@ -485,7 +522,19 @@ async function processJob(jobData, messageId) {
       console.warn("XACK error:", ackErr.message);
     }
   } catch (err) {
+    if (err instanceof JobCancelledError) {
+      console.log(`[Worker] Deployment ${deployment_id} aborted: ${err.message}`);
+      await teardownCreatedContainer(containerResult, deployment_id);
+      await recordWorkerLog(deployment_id, project_id, user_id, "WARN", "worker", `Job aborted: ${err.message}`);
+      try {
+        await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
+      } catch (_) {}
+      return;
+    }
+
     console.error(`Worker error for deployment ${deployment_id}:`, err.message);
+    // Do not leave a running (unhealthy) container behind when the deployment failed
+    await teardownCreatedContainer(containerResult, deployment_id);
     await recordWorkerLog(
       deployment_id,
       project_id,
@@ -511,17 +560,27 @@ async function processJob(jobData, messageId) {
     });
 
     await pool.query(
-      `UPDATE deployments SET status = 'FAILED', error_message = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE deployments SET status = 'FAILED', error_message = $1, updated_at = NOW()
+       WHERE id = $2 AND status NOT IN ('CANCELLED', 'STOPPED')`,
       [err.message, deployment_id]
     );
+    // A failed redeploy must not flip the project to FAILED while a previous deployment still serves traffic
     await pool.query(
-      `UPDATE projects SET status = 'FAILED', updated_at = NOW() WHERE id = $1`,
+      `UPDATE projects
+       SET status = CASE
+             WHEN EXISTS (SELECT 1 FROM deployments WHERE project_id = $1 AND UPPER(status) = 'RUNNING')
+             THEN 'RUNNING' ELSE 'FAILED' END,
+           updated_at = NOW()
+       WHERE id = $1`,
       [project_id]
     );
 
     try {
       await redis.xack(STREAM_NAME, CONSUMER_GROUP, messageId);
     } catch (_) {}
+  } finally {
+    // The workspace is only needed until the image is built; it used to leak on disk forever
+    if (workspacePath) cleanupWorkspace(workspacePath);
   }
 }
 
@@ -556,9 +615,12 @@ async function pollOnce() {
 
     return messages.length;
   } catch (err) {
-    if (!err.message.includes("NOGROUP")) {
-      // Ignore routine timeouts or disconnection
+    if (err.message && err.message.includes("NOGROUP")) {
+      // The consumer group vanished (Redis lost its data): recreate it instead of failing forever
+      await ensureConsumerGroup(true).catch(() => {});
     }
+    // Back off so a Redis outage does not turn the polling loop into a 100% CPU busy-spin
+    await sleep(1000);
     return 0;
   }
 }
@@ -601,4 +663,5 @@ module.exports = {
   startWorkerLoop,
   stopWorkerLoop,
   CONSUMER_NAME,
+  JobCancelledError,
 };

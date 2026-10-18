@@ -6,8 +6,24 @@ const { emitDeploymentLog } = require("../services/logEmitter.js");
 const { publishDeploymentJob, getQueueMetrics } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { getDeploymentHotState, setDeploymentHotState, deleteDeploymentHotState } = require("../services/hotState.js");
-const { stopContainer, removeContainer } = require("../services/dockerClient.js");
+const { stopContainer, removeContainer, resolveContainerTarget } = require("../services/dockerClient.js");
 const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
+
+/**
+ * After tearing a deployment down, the project is only STOPPED/FAILED/... if no other
+ * deployment is still serving traffic.
+ */
+async function setProjectStatusAfterTeardown(projectId, fallbackStatus) {
+  await pool.query(
+    `UPDATE projects
+     SET status = CASE
+           WHEN EXISTS (SELECT 1 FROM deployments WHERE project_id = $1 AND UPPER(status) = 'RUNNING')
+           THEN 'RUNNING' ELSE $2::text END,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [projectId, fallbackStatus]
+  );
+}
 const { canTransition, normalizeStatus } = require("../services/statusMachine.js");
 const { buildPublicUrl } = require("../utils/publicUrl.js");
 const {
@@ -227,10 +243,11 @@ router.post("/", async (req, res) => {
 
     const project = projectRes.rows[0];
     const deployBranch = branch ? String(branch).trim() : project.branch;
-    const deployCommit = String(commit_hash).trim() || project.latest_commit || "HEAD";
+    // `null` skips validation above; String(null) would otherwise persist the literal "null"
+    const deployCommit = String(commit_hash ?? "").trim() || project.latest_commit || "HEAD";
     const deployMessage = sanitizeCommitMessage(commit_message);
-    const deployEnv = String(environment).trim() || "production";
-    const deployTrigger = String(trigger).trim() || "manual";
+    const deployEnv = String(environment ?? "").trim() || "production";
+    const deployTrigger = String(trigger ?? "").trim() || "manual";
 
     const insertResult = await client.query(
       `INSERT INTO deployments (
@@ -434,13 +451,10 @@ router.post("/:id/cancel", async (req, res) => {
       [current.id]
     );
 
-    await pool.query(
-      `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1`,
-      [current.project_id]
-    );
+    await setProjectStatusAfterTeardown(current.project_id, "STOPPED");
 
     // Clean up container, route, and hot state on cancellation
-    const cCancelTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    const cCancelTarget = resolveContainerTarget(current);
     if (cCancelTarget) {
       await stopContainer(cCancelTarget, { expectedDeploymentId: current.id }).catch(() => {});
       await removeContainer(cCancelTarget, { expectedDeploymentId: current.id }).catch(() => {});
@@ -507,13 +521,10 @@ router.post("/:id/stop", async (req, res) => {
       [current.id]
     );
 
-    await pool.query(
-      `UPDATE projects SET status = 'STOPPED', updated_at = NOW() WHERE id = $1`,
-      [current.project_id]
-    );
+    await setProjectStatusAfterTeardown(current.project_id, "STOPPED");
 
     // Clean up container, route, and hot state on stop
-    const cStopTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    const cStopTarget = resolveContainerTarget(current);
     if (cStopTarget) {
       await stopContainer(cStopTarget, { expectedDeploymentId: current.id }).catch(() => {});
       await removeContainer(cStopTarget, { expectedDeploymentId: current.id }).catch(() => {});
@@ -568,7 +579,7 @@ router.delete("/:id", async (req, res) => {
     const current = check.rows[0];
 
     // Clean up container, route, and hot state
-    const cTarget = current.container_id || current.container_name || (current.id ? `df-${current.id.replace(/-/g, "").slice(0, 12)}` : null);
+    const cTarget = resolveContainerTarget(current);
     if (cTarget) {
       await stopContainer(cTarget, { expectedDeploymentId: current.id }).catch(() => {});
       await removeContainer(cTarget, { expectedDeploymentId: current.id }).catch(() => {});
@@ -591,7 +602,7 @@ router.delete("/:id", async (req, res) => {
       [current.project_id]
     );
     const newStatus = remaining.rows.length > 0 ? remaining.rows[0].status : "STOPPED";
-    await pool.query(`UPDATE projects SET status = $1, updated_at = NOW() WHERE id = $2`, [newStatus, current.project_id]);
+    await setProjectStatusAfterTeardown(current.project_id, newStatus);
 
     return res.status(200).json({
       message: `Deployment #${current.deployment_number} has been deleted.`,

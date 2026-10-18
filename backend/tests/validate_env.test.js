@@ -125,8 +125,24 @@ describe("S-05: Environment and Secrets Validation", () => {
       JWT_SECRET: strongKey1,
       ENCRYPTION_KEY: strongKey2,
       DB_PASSWORD: "strong-db-password-123",
+      INTERNAL_TOKEN: "c".repeat(32),
     });
     assert.equal(result.valid, true);
+  });
+
+  it("fails in production when INTERNAL_TOKEN is missing, short or the dev default", () => {
+    const base = {
+      NODE_ENV: "production",
+      JWT_SECRET: strongKey1,
+      ENCRYPTION_KEY: strongKey2,
+      DB_PASSWORD: "strong-db-password-123",
+    };
+    assert.throws(() => validateEnv(base), /INTERNAL_TOKEN must be set in production/);
+    assert.throws(() => validateEnv({ ...base, INTERNAL_TOKEN: "short" }), /INTERNAL_TOKEN must be at least 16/);
+    assert.throws(
+      () => validateEnv({ ...base, INTERNAL_TOKEN: "deployforge-internal-dev-token" }),
+      /known development default/
+    );
   });
 });
 

@@ -114,9 +114,11 @@ export default function LogsPage({ navigate, searchParams }) {
 
     loadHistorical();
 
-    if (isLive) {
+    // The stream endpoint requires a project or deployment id; without one it answers 400 and
+    // EventSource never reconnects, so only open it once a project has been selected.
+    if (isLive && selectedProjectId) {
       cleanupStream = connectLogStream(
-        { project_id: selectedProjectId || undefined },
+        { project_id: selectedProjectId },
         {
           onInit: (initialBatch) => {
             if (abortCtrl.signal.aborted) return;

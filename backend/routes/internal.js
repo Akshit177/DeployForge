@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 const pool = require("../config/db.js");
 const { decrypt } = require("../services/crypto.js");
@@ -7,15 +8,37 @@ const router = express.Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BLOCKED_KEYS = new Set(["LD_PRELOAD", "LD_LIBRARY_PATH"]);
 
+const DEV_INTERNAL_TOKEN = "deployforge-internal-dev-token";
+
+/**
+ * Resolve the shared secret. The well-known dev token is only a convenience outside
+ * production; in production INTERNAL_TOKEN must be configured (validateEnv enforces this at
+ * startup) and, if it is somehow missing, the endpoints are disabled rather than falling back
+ * to a public default that would expose every tenant's decrypted secrets.
+ */
+function getExpectedInternalToken() {
+  if (process.env.INTERNAL_TOKEN) return process.env.INTERNAL_TOKEN;
+  return process.env.NODE_ENV === "production" ? null : DEV_INTERNAL_TOKEN;
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a)).digest();
+  const hb = crypto.createHash("sha256").update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 /**
  * Authentication middleware for internal control-plane requests.
- * Uses shared secret token in X-Internal-Token header.
+ * Uses shared secret token in X-Internal-Token header (constant-time comparison).
  */
 function authenticateInternalToken(req, res, next) {
-  const expectedToken = process.env.INTERNAL_TOKEN || "deployforge-internal-dev-token";
-  const providedToken = req.headers["x-internal-token"];
+  const expectedToken = getExpectedInternalToken();
+  if (!expectedToken) {
+    return res.status(503).json({ error: "Internal API disabled: INTERNAL_TOKEN is not configured" });
+  }
 
-  if (!providedToken || providedToken !== expectedToken) {
+  const providedToken = req.headers["x-internal-token"];
+  if (!providedToken || typeof providedToken !== "string" || !safeEqual(providedToken, expectedToken)) {
     return res.status(401).json({ error: "Invalid or missing internal token" });
   }
 

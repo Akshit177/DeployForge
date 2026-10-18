@@ -19,7 +19,8 @@ const settingsRoutes = require("./routes/settings.js");
 const routingRoutes = require("./routes/routing.js");
 const internalRoutes = require("./routes/internal.js");
 const pool = require("./config/db.js");
-const { resolveDomain, syncFromDatabase } = require("./services/proxyRouter.js");
+const { resolveDomain, syncFromDatabase, syncFromDatabaseThrottled } = require("./services/proxyRouter.js");
+const { escapeHtml } = require("./utils/html.js");
 const app = express();
 
 app.use(express.json());
@@ -27,6 +28,7 @@ app.use(cookieParser());
 app.use(cors({
   origin: process.env.CLIENT_URL || process.env.FRONTEND_URL || "http://localhost:5173",
   credentials: true,
+  exposedHeaders: ["X-Auth-Token"],
 }));
 
 app.use("/api/auth", authRoutes);
@@ -93,7 +95,8 @@ app.use(async (req, res, next) => {
   // In host development or direct proxy mode, check if incoming Host matches an active project route
   let route = resolveDomain(hostHeader);
   if (!route && hostNoPort && hostNoPort !== "localhost" && hostNoPort !== "127.0.0.1") {
-    await syncFromDatabase().catch(() => {});
+    // Throttled: this path is reachable by unauthenticated clients with arbitrary Host headers
+    await syncFromDatabaseThrottled().catch(() => {});
     route = resolveDomain(hostHeader);
   }
 
@@ -104,7 +107,7 @@ app.use(async (req, res, next) => {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${route.project_name} - DeployForge</title>
+  <title>${escapeHtml(route.project_name)} - DeployForge</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
     .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 2rem 2.5rem; max-width: 480px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
@@ -121,12 +124,12 @@ app.use(async (req, res, next) => {
 <body>
   <div class="card">
     <div class="badge">● RUNNING</div>
-    <h1>${route.project_name}</h1>
+    <h1>${escapeHtml(route.project_name)}</h1>
     <p>Application successfully deployed and running on DeployForge</p>
     <div class="meta">
-      <div class="meta-row"><span class="meta-label">Domain:</span><span class="meta-value">${hostHeader}</span></div>
-      <div class="meta-row"><span class="meta-label">Container:</span><span class="meta-value">${route.container_name || "df-container"}</span></div>
-      <div class="meta-row"><span class="meta-label">Internal Port:</span><span class="meta-value">:${route.port}</span></div>
+      <div class="meta-row"><span class="meta-label">Domain:</span><span class="meta-value">${escapeHtml(hostHeader)}</span></div>
+      <div class="meta-row"><span class="meta-label">Container:</span><span class="meta-value">${escapeHtml(route.container_name || "df-container")}</span></div>
+      <div class="meta-row"><span class="meta-label">Internal Port:</span><span class="meta-value">:${escapeHtml(route.port)}</span></div>
       <div class="meta-row"><span class="meta-label">Status:</span><span class="meta-value">200 OK</span></div>
     </div>
   </div>
@@ -157,6 +160,31 @@ app.use(async (req, res, next) => {
       }
     );
 
+    // `timeout` only emits an event; without aborting, a hung upstream would hang the client forever
+    proxyReq.on("timeout", () => proxyReq.destroy(new Error("Upstream request timed out")));
+
+    // Keep a bounded copy of the request body so it can be replayed to the edge fallback
+    const BODY_REPLAY_LIMIT = 1024 * 1024;
+    const bodyChunks = [];
+    let bodySize = 0;
+    let bodyOverflow = false;
+    let bodyComplete = false;
+    let onBodyComplete = null;
+    req.on("data", (chunk) => {
+      if (bodyOverflow) return;
+      bodySize += chunk.length;
+      if (bodySize > BODY_REPLAY_LIMIT) {
+        bodyOverflow = true;
+        bodyChunks.length = 0;
+        return;
+      }
+      bodyChunks.push(chunk);
+    });
+    req.on("end", () => {
+      bodyComplete = true;
+      if (onBodyComplete) onBodyComplete();
+    });
+
     proxyReq.on("error", (err) => {
       // If direct proxying to Docker container name failed (e.g. API running on host machine outside Docker network),
       // fallback to forwarding to local Nginx edge proxy on 127.0.0.1:80
@@ -181,6 +209,7 @@ app.use(async (req, res, next) => {
             edgeRes.pipe(res);
           }
         );
+        edgeReq.on("timeout", () => edgeReq.destroy(new Error("Edge proxy request timed out")));
         edgeReq.on("error", (edgeErr) => {
           console.warn(`[ProxyRouter] Edge proxy fallback error for ${hostHeader}:`, edgeErr.message);
           if (!res.headersSent) {
@@ -190,6 +219,15 @@ app.use(async (req, res, next) => {
             });
           }
         });
+        // The request was created but never sent: it must be ended (with the replayed body)
+        // or the client hangs until the socket timeout.
+        if (bodyOverflow) {
+          edgeReq.destroy(new Error("Request body too large to replay to edge proxy"));
+        } else if (bodyComplete) {
+          edgeReq.end(Buffer.concat(bodyChunks));
+        } else {
+          onBodyComplete = () => edgeReq.end(Buffer.concat(bodyChunks));
+        }
         return;
       }
 
@@ -214,8 +252,8 @@ app.use(async (req, res, next) => {
          FROM projects p
          LEFT JOIN deployments d ON d.project_id = p.id
          WHERE p.name = $1 OR p.domain = $2 OR p.domain ILIKE $3
-         ORDER BY d.created_at DESC LIMIT 1`,
-        [subSlug, hostNoPort, `${subSlug}.%`]
+         ORDER BY d.created_at DESC NULLS LAST LIMIT 1`,
+        [subSlug, hostNoPort, `${subSlug.replace(/[\\%_]/g, "\\$&")}.%`]
       );
 
       if (projCheck.rows.length > 0) {
@@ -228,7 +266,7 @@ app.use(async (req, res, next) => {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${pRow.name} - Deployment Shut Down</title>
+  <title>${escapeHtml(pRow.name)} - Deployment Shut Down</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
     .card { background: #111827; border: 1px solid #374151; border-radius: 12px; padding: 2rem 2.5rem; max-width: 520px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
@@ -240,7 +278,7 @@ app.use(async (req, res, next) => {
 <body>
   <div class="card">
     <div class="badge">● DEPLOYMENT SHUT DOWN</div>
-    <h1>${pRow.name} is stopped</h1>
+    <h1>${escapeHtml(pRow.name)} is stopped</h1>
     <p>This deployment has been stopped or shut down. You can redeploy it from the DeployForge dashboard.</p>
   </div>
 </body>
@@ -253,7 +291,7 @@ app.use(async (req, res, next) => {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${pRow.name} - Build Failed</title>
+  <title>${escapeHtml(pRow.name)} - Build Failed</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
     .card { background: #111827; border: 1px solid #7f1d1d; border-radius: 12px; padding: 2rem 2.5rem; max-width: 520px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
@@ -266,9 +304,9 @@ app.use(async (req, res, next) => {
 <body>
   <div class="card">
     <div class="badge">● DEPLOYMENT FAILED</div>
-    <h1>${pRow.name}</h1>
+    <h1>${escapeHtml(pRow.name)}</h1>
     <p>The application build or deployment failed. View deployment logs in the DeployForge dashboard for details.</p>
-    <div class="err-box">${pRow.error_message || "Build or readiness probe error."}</div>
+    <div class="err-box">${escapeHtml(pRow.error_message || "Build or readiness probe error.")}</div>
   </div>
 </body>
 </html>`);
@@ -281,7 +319,7 @@ app.use(async (req, res, next) => {
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="refresh" content="3" />
-  <title>${pRow.name} - Deploying</title>
+  <title>${escapeHtml(pRow.name)} - Deploying</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
     .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 2rem 2.5rem; max-width: 480px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
@@ -295,8 +333,8 @@ app.use(async (req, res, next) => {
 <body>
   <div class="card">
     <div class="spinner"></div>
-    <div class="badge">● ${currentStatus}</div>
-    <h1>Deploying ${pRow.name}...</h1>
+    <div class="badge">● ${escapeHtml(currentStatus)}</div>
+    <h1>Deploying ${escapeHtml(pRow.name)}...</h1>
     <p>The deployment pipeline is currently running. This page will automatically refresh once the container is ready and serving traffic.</p>
   </div>
 </body>
@@ -321,7 +359,7 @@ app.use(async (req, res, next) => {
 <body>
   <div class="card">
     <h1>404 - Application Not Found</h1>
-    <p>No active deployment was found for domain <code>${hostHeader}</code> on DeployForge.</p>
+    <p>No active deployment was found for domain <code>${escapeHtml(hostHeader)}</code> on DeployForge.</p>
   </div>
 </body>
 </html>`);

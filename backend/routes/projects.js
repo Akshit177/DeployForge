@@ -5,10 +5,10 @@ const { parsePagination } = require("../middleware/pagination.js");
 const { publishDeploymentJob } = require("../services/queue.js");
 const { triggerOutboxRelay } = require("../services/outboxRelay.js");
 const { encrypt } = require("../services/crypto.js");
-const { isValidRepoUrl, isValidBranch } = require("../utils/validators.js");
+const { isValidRepoUrl, isValidBranch, isLikelySecret } = require("../utils/validators.js");
 const { buildPublicUrl } = require("../utils/publicUrl.js");
-const { stopContainer, removeContainer } = require("../services/dockerClient.js");
-const { unregisterUpstreamRoute } = require("../services/proxyRouter.js");
+const { stopContainer, removeContainer, resolveContainerTarget } = require("../services/dockerClient.js");
+const { unregisterUpstreamRoute, registerUpstreamRoute } = require("../services/proxyRouter.js");
 const { deleteDeploymentHotState } = require("../services/hotState.js");
 
 const router = express.Router();
@@ -66,7 +66,9 @@ function sanitizeProjectName(rawName) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9-_]/g, "-")
-    .replace(/^-+|-+$/g, "");
+    // The slug becomes a DNS label and must also satisfy the worker's slug regex
+    // (alphanumeric first character), so trim leading/trailing separators of both kinds.
+    .replace(/^[-_]+|[-_]+$/g, "");
 }
 
 function normalizeRepoUrl(rawUrl) {
@@ -180,9 +182,9 @@ router.post("/", async (req, res) => {
   const projectSlug = sanitizeProjectName(rawName);
   const normalizedRepo = normalizeRepoUrl(rawRepo);
 
-  if (!projectSlug || projectSlug.length < 2 || projectSlug.length > 64) {
+  if (!projectSlug || projectSlug.length < 2 || projectSlug.length > 63) {
     return res.status(400).json({
-      message: "Project name must be 2-64 characters long and contain only letters, numbers, hyphens, and underscores.",
+      message: "Project name must be 2-63 characters long and contain only letters, numbers, hyphens, and underscores.",
     });
   }
 
@@ -270,6 +272,10 @@ router.post("/", async (req, res) => {
         return res.status(400).json({ message: "Maximum limit of 100 environment variables per project." });
       }
       for (const item of varsToSave) {
+        if (!item || typeof item !== "object") {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: "Each environment variable must be an object with a key and value." });
+        }
         const rawKey = item.key;
         const rawVal = item.value ?? "";
         const key = String(rawKey || "").trim().toUpperCase();
@@ -285,7 +291,7 @@ router.post("/", async (req, res) => {
           await client.query("ROLLBACK");
           return res.status(400).json({ message: `Variable value for "${key}" exceeds maximum allowed size of 8 KB.` });
         }
-        const isSecret = Boolean(item.isSecret !== undefined ? item.isSecret : item.is_secret);
+        const isSecret = isLikelySecret(key, item.isSecret !== undefined ? item.isSecret : item.is_secret);
         const enc = encrypt(String(rawVal));
         await client.query(
           `INSERT INTO project_env_vars (
@@ -544,6 +550,10 @@ router.patch("/:id", async (req, res) => {
         return res.status(400).json({ message: "Maximum limit of 100 environment variables per project." });
       }
       for (const item of varsSource) {
+        if (!item || typeof item !== "object") {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: "Each environment variable must be an object with a key and value." });
+        }
         const rawKey = item.key;
         const rawVal = item.value ?? "";
         const key = String(rawKey || "").trim().toUpperCase();
@@ -559,7 +569,7 @@ router.patch("/:id", async (req, res) => {
           await client.query("ROLLBACK");
           return res.status(400).json({ message: `Variable value for "${key}" exceeds maximum allowed size of 8 KB.` });
         }
-        const isSecret = Boolean(item.isSecret !== undefined ? item.isSecret : item.is_secret);
+        const isSecret = isLikelySecret(key, item.isSecret !== undefined ? item.isSecret : item.is_secret);
         const enc = encrypt(String(rawVal));
         await client.query(
           `INSERT INTO project_env_vars (
@@ -577,6 +587,35 @@ router.patch("/:id", async (req, res) => {
     }
 
     await client.query("COMMIT");
+
+    // Renaming changes the project's domain. The live route is keyed by domain, so move it
+    // too - otherwise the running app silently becomes unreachable until the next redeploy.
+    if (newDomain !== current.domain) {
+      try {
+        const running = await pool.query(
+          `SELECT id, container_id, container_name FROM deployments
+           WHERE project_id = $1 AND UPPER(status) = 'RUNNING'
+           ORDER BY created_at DESC LIMIT 1`,
+          [id]
+        );
+        if (current.domain) unregisterUpstreamRoute(current.domain, { projectId: id });
+        if (running.rows.length > 0 && newDomain) {
+          const dep = running.rows[0];
+          const containerName = resolveContainerTarget({ ...dep, deployment_id: dep.id });
+          registerUpstreamRoute(newDomain, {
+            project_id: id,
+            project_name: newName,
+            deployment_id: dep.id,
+            container_id: dep.container_id,
+            container_name: containerName,
+            target_host: containerName,
+            port: updateResult.rows[0].port || 3000,
+          });
+        }
+      } catch (routeErr) {
+        console.warn("Failed to move route after project rename:", routeErr.message);
+      }
+    }
 
     return res.status(200).json({
       message: "Project updated successfully.",
@@ -622,7 +661,7 @@ router.delete("/:id", async (req, res) => {
 
     // 2. Tear down all containers for deployments under this project
     for (const row of check.rows) {
-      const cTarget = row.container_id || row.container_name || (row.deployment_id ? `df-${row.deployment_id.replace(/-/g, "").slice(0, 12)}` : null);
+      const cTarget = row.deployment_id ? resolveContainerTarget(row) : null;
       if (cTarget) {
         await stopContainer(cTarget, { expectedDeploymentId: row.deployment_id }).catch(() => {});
         await removeContainer(cTarget, { expectedDeploymentId: row.deployment_id }).catch(() => {});
@@ -634,7 +673,7 @@ router.delete("/:id", async (req, res) => {
 
     // 3. Unregister routes from proxyRouter and sync Nginx
     if (projectDomain) {
-      unregisterUpstreamRoute(projectDomain, { projectId: id, projectName });
+      unregisterUpstreamRoute(projectDomain, { projectId: id });
     }
 
     // 4. Delete the project from PostgreSQL (cascades to deployments, env_vars, etc.)
@@ -656,7 +695,6 @@ router.delete("/:id", async (req, res) => {
 // Nested sub-routes for Environment Variables & Encrypted Secrets Vault
 const envRoutes = require("./envVars.js");
 router.use("/:projectId/env", envRoutes);
-router.use("/:id/env", envRoutes);
 
 router.allocateDomain = allocateDomain;
 router.RESERVED_SLUGS = RESERVED_SLUGS;

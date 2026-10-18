@@ -1,10 +1,18 @@
 const express = require("express");
 const pool = require("../config/db.js");
 const { authenticateToken } = require("../middleware/auth.js");
-const { getRoutingTable, resolveDomain, registerUpstreamRoute, syncFromDatabase } = require("../services/proxyRouter.js");
+const {
+  getRoutingTable,
+  resolveDomain,
+  registerUpstreamRoute,
+  syncFromDatabase,
+  syncFromDatabaseThrottled,
+  normalizeDomainKey,
+} = require("../services/proxyRouter.js");
 const { checkProjectHealth } = require("../services/healthCheck.js");
 
 const router = express.Router();
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Require authentication across all routing endpoints
 router.use(authenticateToken);
@@ -26,7 +34,7 @@ router.get("/table", async (req, res) => {
     );
 
     if (routes.length === 0 && allowedProjectIds.size > 0) {
-      await syncFromDatabase();
+      await syncFromDatabaseThrottled();
       routes = getRoutingTable().filter((r) =>
         allowedProjectIds.has(r.project_id)
       );
@@ -50,7 +58,7 @@ router.get("/resolve/:domain", async (req, res) => {
   const { domain } = req.params;
   let match = resolveDomain(domain);
   if (!match) {
-    await syncFromDatabase();
+    await syncFromDatabaseThrottled();
     match = resolveDomain(domain);
   }
 
@@ -92,6 +100,10 @@ router.get("/resolve/:domain", async (req, res) => {
 router.get("/health/:projectId", async (req, res) => {
   const { projectId } = req.params;
 
+  if (!UUID_REGEX.test(projectId)) {
+    return res.status(404).json({ message: "Project not found" });
+  }
+
   try {
     const health = await checkProjectHealth(projectId, req.user.id);
     if (health.error) {
@@ -107,13 +119,67 @@ router.get("/health/:projectId", async (req, res) => {
 
 /**
  * PUT /api/routing/:domain
- * Register or update an upstream route for a domain
+ * Re-register the upstream route of one of the caller's OWN projects.
+ *
+ * The upstream is derived server-side from the project's currently RUNNING deployment. The
+ * request body is never trusted for `target_host` / `project_id` / `deployment_id`: letting
+ * clients choose those allowed hijacking other tenants' domains, proxying to internal hosts
+ * (SSRF) and injecting arbitrary text into the generated nginx config. Only an optional
+ * `port` override is honoured.
  */
 router.put("/:domain", async (req, res) => {
-  const { domain } = req.params;
-  const routeInfo = req.body || {};
+  const cleanDomain = normalizeDomainKey(req.params.domain);
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+
   try {
-    const updated = registerUpstreamRoute(domain, routeInfo);
+    if (!cleanDomain) {
+      return res.status(400).json({ message: "A valid domain is required." });
+    }
+
+    const projectResult = await pool.query(
+      "SELECT id, name, domain, port FROM projects WHERE LOWER(domain) = $1 AND user_id = $2",
+      [cleanDomain, req.user.id]
+    );
+    if (projectResult.rows.length === 0) {
+      return res.status(404).json({ message: "Domain not found." });
+    }
+    const project = projectResult.rows[0];
+
+    let port = project.port || 3000;
+    if (body.port !== undefined && body.port !== null && body.port !== "") {
+      port = Number(body.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return res.status(400).json({ message: "Port must be an integer between 1 and 65535." });
+      }
+    }
+
+    const deployment = await pool.query(
+      `SELECT id, container_id, container_name
+       FROM deployments
+       WHERE project_id = $1 AND UPPER(status) = 'RUNNING'
+       ORDER BY created_at DESC LIMIT 1`,
+      [project.id]
+    );
+    if (deployment.rows.length === 0) {
+      return res.status(409).json({ message: "Project has no running deployment to route to." });
+    }
+    const dep = deployment.rows[0];
+    const containerName = dep.container_name || `df-${dep.id.replace(/-/g, "").slice(0, 12)}`;
+
+    const updated = registerUpstreamRoute(project.domain, {
+      project_id: project.id,
+      project_name: project.name,
+      deployment_id: dep.id,
+      container_id: dep.container_id,
+      container_name: containerName,
+      target_host: containerName,
+      port,
+    });
+
+    if (!updated) {
+      return res.status(400).json({ message: "Route could not be registered." });
+    }
+
     return res.status(200).json({
       success: true,
       route: updated,

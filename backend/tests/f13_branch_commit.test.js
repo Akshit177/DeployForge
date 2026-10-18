@@ -40,7 +40,7 @@ describe("F-13: Wrong-branch fallback elimination and commit_hash persistence", 
 
     // Create a local git repository fixture
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), "df_test_repo_"));
-    execSync("git init", { cwd: testRepoDir });
+    execSync("git init -b main", { cwd: testRepoDir });
     execSync("git config user.name 'Test Committer'", { cwd: testRepoDir });
     execSync("git config user.email 'committer@deployforge.test'", { cwd: testRepoDir });
 

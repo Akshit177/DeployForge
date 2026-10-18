@@ -102,6 +102,7 @@ jobs:
           JWT_SECRET: ci_test_jwt_secret_token_minimum_32_chars_ok
           ENCRYPTION_KEY: ci_test_encryption_key_minimum_32_chars_diff
           DB_PASSWORD: ci_test_db_password_12345
+          INTERNAL_TOKEN: ci_test_internal_token_minimum_16_chars
         run: docker compose build
 
       - name: Verify Clean Git State

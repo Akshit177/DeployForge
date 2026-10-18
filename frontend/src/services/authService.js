@@ -49,7 +49,14 @@ export async function getCurrentUser(options = {}) {
       ...options,
     });
     return data.user || null;
-  } catch (_) {
+  } catch (err) {
+    // The session is gone: drop the stale token so it is not sent again
+    if (err && err.status === 401) {
+      try {
+        localStorage.removeItem("df_token");
+        localStorage.removeItem("token");
+      } catch (_) {}
+    }
     return null;
   }
 }

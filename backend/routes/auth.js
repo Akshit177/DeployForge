@@ -1,19 +1,15 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const pool = require("../config/db.js");
-const { generateAccessToken, verifyAccessToken } = require("../services/auth.js");
+const { generateAccessToken, verifyAccessToken, getCookieOptions } = require("../services/auth.js");
 const { createSession, destroySession } = require("../services/sessionService.js");
 
 const { authenticateToken } = require("../middleware/auth.js");
 
 const router = express.Router();
 
-const cookieOptions = {
-    httpOnly: true,
-    secure: process.env.COOKIE_SECURE === "true",
-    sameSite: "lax",
-    maxAge: 15 * 60 * 1000,
-};
+const cookieOptions = getCookieOptions();
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function publicUser(user) {
     return {
@@ -31,8 +27,10 @@ router.post("/register", async (req, res) => {
     if (
         typeof user_name !== "string" ||
         !user_name.trim() ||
+        user_name.trim().length > 255 ||
         typeof email !== "string" ||
-        !email.trim() ||
+        !EMAIL_REGEX.test(email.trim()) ||
+        email.trim().length > 255 ||
         typeof password !== "string" ||
         password.length < 8
     ) {
@@ -109,7 +107,11 @@ router.post("/login", async (req, res) => {
 
 router.post("/logout", async (req, res) => {
     try {
-        const token = req.cookies?.token;
+        // Accept the cookie or an Authorization: Bearer header so API clients can sign out too
+        let token = req.cookies?.token;
+        if (!token && req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
+            token = req.headers.authorization.slice(7).trim();
+        }
         if (token) {
             try {
                 const decoded = verifyAccessToken(token);

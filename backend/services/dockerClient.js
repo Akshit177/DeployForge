@@ -131,7 +131,10 @@ async function buildImage(contextPath, imageName, options = {}) {
 
   try {
     const docker = getDocker();
-    const tarStream = tar.pack(contextPath);
+    // Never ship the repository's .git directory into the image (size + leaks history/credentials)
+    const tarStream = tar.pack(contextPath, {
+      ignore: (name) => path.relative(contextPath, name).split(path.sep)[0] === ".git",
+    });
     const dockerfile = options.dockerfile || "Dockerfile";
 
     const stream = await docker.buildImage(tarStream, {
@@ -248,6 +251,7 @@ async function createContainer(config) {
     const hostConfig = {
       Privileged: false,
       ReadonlyRootfs: false,
+      SecurityOpt: ["no-new-privileges:true"],
     };
 
     if (config.resourceLimits) {
@@ -489,7 +493,23 @@ async function removeContainer(containerId, options = {}) {
   }
 }
 
+/**
+ * Pick the identifier to pass to stop/remove for a stored deployment row.
+ *
+ * `deployments.container_id` holds a display id (`c_<12 hex>`) that is NOT a valid Docker
+ * identifier in real mode (the daemon only knows the full id / the container name), so
+ * `docker.getContainer("c_...")` 404s and the container is never torn down. The container name
+ * (`df-<12 hex>`) is valid in both real and simulator mode, so it takes precedence.
+ */
+function resolveContainerTarget(row = {}) {
+  if (row.container_name) return row.container_name;
+  const depId = row.deployment_id || row.id;
+  if (depId) return `df-${String(depId).replace(/-/g, "").slice(0, 12)}`;
+  return row.container_id || null;
+}
+
 module.exports = {
+  resolveContainerTarget,
   isDockerAvailable,
   buildImage,
   createContainer,
